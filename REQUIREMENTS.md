@@ -80,7 +80,8 @@ Responsible for authentication, single-active-session enforcement, session lifec
 - **FR-R7**: The system must validate whether a played card is legal according to the current game state.
 - **FR-R8**: The system must support gameplay actions including play card, draw card, Uno call, challenge Uno call, and penalty resolution.
 - **FR-R9**: The system must support time-sensitive rule interactions when timing affects move validity.
-- **FR-R12**: The system must reject stale, invalid, or conflicting actions against the authoritative game state.
+- **FR-R12**: The system must reject stale, invalid, or conflicting actions against the authoritative game state. Concurrent actions on the same game must be serialized using strict sequence numbers; stale actions must be rejected.
+- **FR-R28**: All card shuffling and draws must be generated **server-side** using a deterministic, seeded RNG. No card distribution or random outcome may depend on client-side input.
 
 **Uno Call Mechanics:**
 
@@ -99,7 +100,7 @@ Responsible for authentication, single-active-session enforcement, session lifec
 
 - **FR-R15**: A disconnected player has a **60-second** reconnection window before being considered inactive.
 - **FR-R16**: During the reconnection window, the disconnected player's turn is **skipped** (treated as a pass). No bot substitution occurs.
-- **FR-R24**: If the reconnection window expires during the player's turn, an **automatic forfeit** is issued.
+- **FR-R24**: If the reconnection window expires, an **automatic forfeit** is issued regardless of whose turn it is at that moment.
 - **FR-R25**: Forfeit in a **casual room** ends the player's participation; the game continues with remaining players.
 - **FR-R26**: Forfeit in a **tournament room** counts as a loss for that match; the player is eliminated from the tournament.
 - **FR-R27**: A player who reconnects within the window resumes with their original hand intact.
@@ -149,12 +150,13 @@ Responsible for authentication, single-active-session enforcement, session lifec
 
 ### 4.6 Audit & Game History Context
 
-- **FR-A1**: The system must preserve an immutable history of game-relevant state changes.
+- **FR-A1**: The system must preserve an immutable history of game-relevant state changes. Every state change must be appended to the game log **before** being broadcast to clients.
 - **FR-A2**: The system must trace all relevant player actions and system-generated rule resolutions to the corresponding game.
-- **FR-A3**: The system must preserve sufficient information to reconstruct or replay game progression.
-- **FR-A4**: The system must preserve traceability of card distribution and any random outcome used in authoritative play.
+- **FR-A3**: The system must preserve sufficient information to reconstruct or replay game progression, including all RNG seeds used for shuffles and draws.
+- **FR-A4**: The system must preserve traceability of card distribution and any random outcome used in authoritative play. Every random outcome must be deterministic and reproducible from the stored seed.
 - **FR-A5**: The system must support post-match review for dispute resolution.
 - **FR-A6**: The system must define retention rules for historical game and tournament records.
+- **FR-A7**: The system must maintain audit logs for **sensitive operations** beyond gameplay (e.g., login attempts, session invalidations, role changes, tournament cancellations).
 
 ### 4.7 Identity & Session Context
 
@@ -222,7 +224,7 @@ Responsible for authentication, single-active-session enforcement, session lifec
 - **DR-4**: A player may advance in a tournament only if recognized as a top-3 finisher of the current round's room.
 - **DR-5**: A spectator may observe but must not modify competitive state. Spectators must never see private player hands.
 - **DR-6**: Global Elo rankings may only be modified from valid, finalized casual game results. Abandoned games do not affect Elo.
-- **DR-7**: Authoritative game history must be immutable once committed.
+- **DR-7**: Authoritative game history must be immutable once committed. State changes must be logged before being broadcast to clients (log-before-broadcast invariant).
 - **DR-8**: A player may not take an action outside their valid turn unless the rules explicitly allow it (e.g., Uno challenge within the 5-second window).
 - **DR-9**: A stale action must not override a newer authoritative state.
 - **DR-10**: A tournament match result must not be applied more than once to advancement or ranking.
@@ -231,3 +233,4 @@ Responsible for authentication, single-active-session enforcement, session lifec
 - **DR-13**: A match consists of a best-of-three series of games. The match winner is the first player to win 2 games.
 - **DR-14**: Tournament rounds continue until 10 or fewer players remain, at which point a final room determines the champion.
 - **DR-15**: Each player may have only one active session at a time. A new login invalidates the previous session.
+- **DR-16**: All card shuffling, draws, and random outcomes must be generated server-side with a deterministic seeded RNG. The seed must be stored per game for audit replay.

@@ -6,48 +6,82 @@
 ---
 
 ## 1. Event Storming
-
 ### 1.1 Room Play Flow (temporal, left to right)
 
 A room hosts a **match** (best-of-three series of individual **games**). The flow below describes one game within a match; the match-level lifecycle wraps around it.
 
 ```
-Actor           Command              Event                        Aggregate      Policy / Hotspot
-─────           ───────              ─────                        ─────────      ────────────────
+Actor              Command              Event                        Aggregate   Policy / Hotspot
+─────              ───────              ─────                        ─────────   ────────────────
 
-Player      →   CreateRoom        →  RoomCreated                  Room
-Player      →   JoinRoom          →  PlayerJoined                 Room
-System      →   StartMatch        →  MatchStarted                 Room           Policy: match starts when min players reached and host triggers start
-System      →   StartGame         →  GameStarted                  Room           Policy: first game of the best-of-three begins; or next game after previous game ends if no player has 2 wins yet
-                                     DeckShuffled                 Room
-                                     CardsDealt                   Room
-                                     InitialCardRevealed          Room
-                                     TurnStarted                  Room
+Player          →  CreateRoom        →  RoomCreated                  Room
+Player          →  JoinRoom          →  PlayerJoined                 Room
+Tournament      →  StartMatch        →  MatchStarted                 Room        Policy: match starts when min players reached
+  Context                                                                          and host triggers start
+Room            →  StartGame         →  GameStarted                  Room        Policy: first game of the best-of-three begins;
+  Aggregate                                                                        or next game after previous game ends
+                                                                                   if no player has 2 wins yet
+                                        DeckShuffled                 Room
+                                        CardsDealt                   Room
+                                        InitialCardRevealed          Room
+                                        TurnStarted                  Room
 
-Player      →   PlayCard          →  CardPlayed                   Room           Policy: card must match discard pile top by color or face, or be wild
-                                     DirectionReversed            Room           Policy: reverse card flips turn direction
-                                     TurnSkipped                  Room           Policy: skip card advances past next player
-                                     DrawPenaltyApplied           Room           Policy: draw-two / wild-draw-four forces next player to draw
+Player          →  PlayCard          →  CardPlayed                   Room        Policy: card must match discard pile top
+                                                                                   by color or face, or be wild
+                                        DirectionReversed            Room        Policy: reverse card flips turn direction
+                                        TurnSkipped                  Room        Policy: skip card advances past next player
+                                        DrawPenaltyApplied           Room        Policy: draw-two / wild-draw-four forces
+                                                                                   next player to draw
 
-Player      →   DrawCard          →  CardDrawn                    Room
-                                     TurnAdvanced                 Room
+Player          →  DrawCard          →  CardDrawn                    Room
+                                        TurnAdvanced                 Room
 
-Player      →   CallUno           →  UnoCallMade                  Room           Policy: must be called when player plays second-to-last card, before next turn
-Player      →   ChallengeUnoCall  →  UnoCallChallenged            Room           Policy: challenge valid only within 5-second window or before next turn starts (whichever is first)
-                                     ChallengePenaltyApplied      Room           Policy: missed Uno → target draws 2; false challenge → challenger draws 2
+Player          →  CallUno           →  UnoCallMade                  Room        Policy: must be called when player plays
+                                                                                   second-to-last card, before next turn
+Player          →  ChallengeUnoCall  →  UnoCallChallenged            Room        Policy: challenge valid only within 5-second
+                                                                                   window or before next turn starts
+                                                                                   (whichever is first)
+                                        ChallengePenaltyApplied      Room        Policy: missed Uno → target draws 2;
+                                                                                   false challenge → challenger draws 2
 
-System      →   ExpireTurn        →  TurnTimedOut                 Room           Policy: if turn timer expires, system skips the player's turn (pass)
-System      →   DetectDisconnect  →  PlayerDisconnected           Room           Policy: 60-second grace timer starts; disconnected player's turns are skipped (passed), no bot substitution
-Player      →   Reconnect         →  PlayerReconnected            Room           Policy: player resumes with original hand; delta replay from last known sequence number
-System      →   ExpireGraceTimer  →  PlayerForfeited              Room           Policy: casual room → player removed, game continues with remaining players; tournament room → counted as match loss, player eliminated
+Room            →  ExpireTurn        →  TurnTimedOut                 Room        Policy: if turn timer expires, system skips
+  Aggregate                                                                        the player's turn (pass)
+Room            →  DetectDisconnect  →  PlayerDisconnected           Room        Policy: 60-second grace timer starts;
+  Context                                                                          disconnected player's turns are skipped
+                                                                                   (passed), no bot substitution
+Player          →  Reconnect         →  PlayerReconnected            Room        Policy: player resumes with original hand;
+                                                                                   delta replay from last known sequence number
+Room            →  ExpireGraceTimer  →  PlayerForfeited              Room        Policy: casual room → player removed, game
+  Context                                                                          continues with remaining players;
+                                                                                   tournament room → counted as match loss,
+                                                                                   player eliminated
 
-System      →   DetectGameWinner  →  GameCompleted                Room           Policy: player plays last card → game winner determined; card-point totals recorded for all players
-                                     GameResultPublished          Room           Policy: published to Ranking (casual only) and Audit
+Room            →  DetectGameWinner  →  GameCompleted                Room        Policy: player plays last card → game winner
+  Aggregate                                                                        determined; card-point totals recorded
+                                                                                   for all players
+                                        GameResultPublished          Room        Policy: published to Ranking (casual only)
+                                                                                   and Audit
+```
 
-[If no player has won 2 games yet → System triggers StartGame for next game in the series]
+**After GameCompleted:**
 
-System      →   DetectMatchWinner →  MatchCompleted               Room           Policy: first player to win 2 games wins the match; final placement order (1st through last) determined
-                                     MatchResultPublished         Room           Policy: result published to Tournament (if tournament room), Ranking (placement order), Audit
+- If fewer than 3 games have been played AND the placement ranking is not yet mathematically determined → Room Aggregate triggers `StartGame` for the next game in the series.
+- If 3 games have been completed OR the ranking is mathematically locked → Room Aggregate triggers `DetectMatchResults`.
+
+```
+Room            →  DetectMatchResults → MatchCompleted               Room        Policy: placement order determined by
+  Aggregate                                                                        (1) game wins desc,
+                                                                                   (2) cumulative card-point total asc
+                                                                                       among tied players,
+                                                                                   (3) earliest final-game completion
+                                                                                       timestamp.
+                                                                                   In tournament rooms, top 3 advance.
+                                        MatchResultPublished         Room        Policy: published to Tournament Context
+                                                                                   (if tournament room, triggers round
+                                                                                   advancement check), Ranking Context
+                                                                                   (casual → Elo per game, tournament →
+                                                                                   tournament-placement rating),
+                                                                                   Audit Context.
 ```
 
 **Hotspots (puntos de conflicto):**
@@ -56,58 +90,89 @@ System      →   DetectMatchWinner →  MatchCompleted               Room      
 - 🔴 **Challenge window boundary**: The 5-second Uno challenge window closes either after 5 seconds OR when the next player begins their turn, whichever comes first. Server-authoritative timestamps determine validity.
 - 🔴 **Disconnection vs. turn timeout**: Independent timers. The 60-second grace timer governs participant status; turn timeouts continue and result in skipped turns (passes). No extra time is granted.
 - 🔴 **Stale actions**: A player sends an action against an outdated state version → Rejected; client must reconcile from the live state stream.
-- 🔴 **Best-of-three edge cases**: What if a player disconnects between games within a match? → The grace timer applies across the match, not per game. Forfeit mid-match = match loss.
+- 🔴 **Disconnection in a match**: What if a player disconnects between games within a match? → The grace timer applies across the match, not per game. Forfeit mid-match = match loss.
 - 🔴 **False challenge penalty**: A player challenges an Uno call that was correctly made → The challenger draws 2 cards, not the target.
+
+---
 
 ### 1.2 Tournament Flow (temporal, left to right)
 
 ```
-Actor                   Command                Event                           Aggregate       Policy / Hotspot
-─────                   ───────                ─────                           ─────────       ────────────────
+Actor              Command                Event                        Aggregate    Policy / Hotspot
+─────              ───────                ─────                        ─────────    ────────────────
 
-TournamentOperator  →   CreateTournament    →  TournamentCreated               Tournament
-TournamentOperator  →   OpenRegistration    →  RegistrationOpened              Tournament
-Player              →   RegisterForTournament → PlayerRegistered               Tournament
-TournamentOperator  →   CloseRegistration   →  RegistrationClosed              Tournament
+Tournament      →  CreateTournament    →  TournamentCreated            Tournament
+  Operator
+Tournament      →  OpenRegistration    →  RegistrationOpened           Tournament
+  Operator
+Player          →  RegisterForTournament → PlayerRegistered            Tournament
+Tournament      →  CloseRegistration   →  RegistrationClosed           Tournament
+  Operator
 
-System              →   GenerateBrackets    →  BracketsGenerated               Tournament      Policy: players grouped into rooms of up to 10
-                                               RoundStarted                    Tournament
-                                               MatchesScheduled                Tournament      Policy: rooms requested for all matches in the round
+Tournament      →  GenerateBrackets    →  RoundStarted                 Tournament   Policy: players grouped into rooms of up
+  Aggregate                                                                           to 10; round becomes active; payload
+                                                                                      includes bracket structure and match list;
+                                                                                      Room Context (downstream) consumes this
+                                                                                      event to create the corresponding rooms
+```
 
-[Room Play context runs best-of-three matches and emits MatchCompleted events]
+*\[Room Play context runs best-of-three matches and emits MatchCompleted events\]*
 
-System              →   IngestMatchResult   →  MatchResultRecorded             Tournament      Policy: idempotent on {matchId, gameNumber, sequenceNumber}
-System              →   DetermineAdvancers  →  Top3Advanced                    Tournament      Policy: top 3 players by match wins advance; tie-breaker 1: lower cumulative card-point total; tie-breaker 2: earliest final-game completion time
-                                               PlayersEliminated               Tournament      Policy: non-top-3 players marked as eliminated
-                                               RoundCompleted                  Tournament      Policy: round completes when all rooms in it have reported results
+```
+Tournament      →  IngestMatchResult   →  MatchResultRecorded          Tournament   Policy: idempotent on
+  Context                                                                             {matchId, gameNumber, sequenceNumber}
+Tournament      →  DetermineAdvancers  →  Top3Advanced                 Tournament   Policy: top 3 players by match wins advance;
+  Aggregate                                                                           tie-breaker 1: lower cumulative
+                                                                                      card-point total;
+                                                                                      tie-breaker 2: earliest final-game
+                                                                                      completion time
+                                          PlayersEliminated            Tournament   Policy: non-top-3 players marked
+                                                                                      as eliminated
+                                          RoundCompleted               Tournament   Policy: round completes when all rooms
+                                                                                      in it have reported results
+```
 
-[If more than 10 players remain → System triggers GenerateBrackets for next round]
+*\[If more than 10 players remain → Tournament Aggregate triggers GenerateBrackets for next round\]*
 
-System              →   CreateFinalRoom     →  FinalRoomCreated                Tournament      Policy: when ≤10 players remain, a single final room is created
-System              →   DetectChampion      →  TournamentCompleted             Tournament      Policy: final room match winner is the tournament champion; full standings determined
-                                               FinalStandingsPublished         Tournament
+```
+Tournament      →  CreateFinalRoom     →  FinalRoomCreated             Tournament   Policy: when ≤10 players remain,
+  Aggregate                                                                           a single final room is created
+Tournament      →  DetectChampion      →  TournamentCompleted          Tournament   Policy: final room match winner is
+  Aggregate                                                                           the tournament champion; full standings
+                                                                                      determined
+                                          FinalStandingsPublished      Tournament
 
-TournamentOperator  →   CancelTournament    →  TournamentCancelled             Tournament      Policy: all further advancement stops immediately; in-flight results discarded
+Tournament      →  CancelTournament    →  TournamentCancelled          Tournament   Policy: all further advancement stops
+  Operator                                                                            immediately; in-flight results discarded
 ```
 
 **Hotspots (puntos de conflicto):**
 
 - 🔴 **Mass simultaneous completion**: Up to 100,000 rooms in a round complete near-simultaneously → Must handle burst ingestion without corrupting bracket state.
-- 🔴 **Crash mid-advancement**: System fails between recording a result and advancing players → Saga pattern with idempotent steps; replay on recovery.
+- 🔴 **Crash mid-advancement**: System fails between recording a result and advancing players → Each step in the advancement process is idempotent (can be re-executed without duplicating effects). On recovery, the process resumes from the last confirmed step and re-executes pending ones.
 - 🔴 **Cancelled tournament + in-flight results**: A result arrives after cancellation → Discarded; no advancement or ranking updates triggered.
 - 🔴 **Top-3 tie-breaking edge cases**: All players in a room have the same match wins and card-point totals → Earliest final-game completion time breaks the tie. If still tied (simultaneous completion), arbitrary but deterministic ordering (e.g., by playerId) is applied.
 - 🔴 **Odd player counts**: When remaining players don't divide evenly into rooms of 10 → Rooms are filled as evenly as possible (e.g., 23 players → rooms of 8, 8, 7).
 
+---
+
 ### 1.3 Ranking Flow
 
 ```
-Actor       Command                 Event                      Aggregate        Policy
-─────       ───────                 ─────                      ─────────        ──────
+Actor              Command                    Event                     Aggregate        Policy
+─────              ───────                    ─────                     ─────────        ──────
 
-System  →   ProcessCasualGameResult → EloUpdated               PlayerRanking    Policy: Elo updated once per completed casual game (not per match, not per tournament)
-                                     RatingHistoryAppended     PlayerRanking    Policy: delta calculated from final placement order (1st through last) within the room
-                                                                                Policy: idempotent on {gameId, sequenceNumber}
-                                                                                Policy: abandoned games (forfeit by all remaining players) do NOT affect Elo
+Ranking         →  ProcessCasualGameResult  →  EloUpdated               PlayerRanking    Policy: Elo updated once per completed
+  Context                                                                                  casual game (not per match,
+                                                                                           not per tournament)
+                                               RatingHistoryAppended    PlayerRanking    Policy: delta calculated from final
+                                                                                           placement order (1st through last)
+                                                                                           within the room
+                                                                                         Policy: idempotent on
+                                                                                           {gameId, sequenceNumber}
+                                                                                         Policy: abandoned games (forfeit by
+                                                                                           all remaining players)
+                                                                                           do NOT affect Elo
 ```
 
 **Note:** Tournament play uses a separate **tournament-placement rating** that is updated based on tournament standings, not the global Elo system.
