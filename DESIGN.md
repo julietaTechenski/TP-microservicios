@@ -58,8 +58,10 @@ Room            →  ExpireGraceTimer  →  PlayerForfeited              Room   
 
 Room            →  DetectGameWinner  →  GameCompleted                Room        Policy: player plays last card → game winner
   Aggregate                                                                        determined; card-point totals recorded
-                                                                                   for all players
-                                        GameResultPublished          Room        Policy: published to Ranking (casual only)
+                                                                                   for all players (internal aggregate event)
+                                        GameResultPublished          Room        Policy: integration event carrying the
+                                                                                   GameResult value object; published to
+                                                                                   Ranking (casual rooms only, for Elo)
                                                                                    and Audit
 ```
 
@@ -76,13 +78,18 @@ Room            →  DetectMatchResults → MatchCompleted               Room   
                                                                                    (3) earliest final-game completion
                                                                                        timestamp.
                                                                                    In tournament rooms, top 3 advance.
-                                        MatchResultPublished         Room        Policy: published to Tournament Context
-                                                                                   (if tournament room, triggers round
-                                                                                   advancement check), Ranking Context
-                                                                                   (casual → Elo per game, tournament →
-                                                                                   tournament-placement rating),
-                                                                                   Audit Context.
+                                                                                   (internal aggregate event)
+                                        MatchResultPublished         Room        Policy: integration event carrying the
+                                                                                   MatchResult value object; published to
+                                                                                   Tournament Context (if tournament room,
+                                                                                   triggers round advancement check),
+                                                                                   Spectator Context, and Audit Context.
 ```
+
+**Completed vs Published events:**
+
+- `GameCompleted` and `MatchCompleted` are **internal aggregate events** that record the end-of-game and end-of-match state transitions within the Room aggregate. They trigger internal logic (e.g., starting the next game, calculating placement order).
+- `GameResultPublished` and `MatchResultPublished` are **integration events** emitted after the internal events. They carry the corresponding value objects (`GameResult` and `MatchResult`) as their payloads and are the events consumed by downstream bounded contexts.
 
 **Hotspots (puntos de conflicto):**
 
@@ -109,14 +116,15 @@ Player          →  RegisterForTournament → PlayerRegistered            Tourn
 Tournament      →  CloseRegistration   →  RegistrationClosed           Tournament
   Operator
 
-Tournament      →  GenerateBrackets    →  RoundStarted                 Tournament   Policy: players grouped into rooms of up
-  Aggregate                                                                           to 10; round becomes active; payload
-                                                                                      includes bracket structure and match list;
-                                                                                      Room Context (downstream) consumes this
-                                                                                      event to create the corresponding rooms
+Tournament      →  GenerateBrackets    →  BracketsGenerated            Tournament   Policy: players grouped into rooms of up
+  Aggregate                                                                           to 10; bracket structure and match list
+                                                                                      determined
+                                          RoundStarted                 Tournament   Policy: round becomes active; Room Context
+                                                                                      (downstream) consumes this event to
+                                                                                      create the corresponding rooms
 ```
 
-*\[Room Play context runs best-of-three matches and emits MatchCompleted events\]*
+*\[Room Play context runs best-of-three matches and emits MatchResultPublished events\]*
 
 ```
 Tournament      →  IngestMatchResult   →  MatchResultRecorded          Tournament   Policy: idempotent on
@@ -139,8 +147,10 @@ Tournament      →  CreateFinalRoom     →  FinalRoomCreated             Tourn
   Aggregate                                                                           a single final room is created
 Tournament      →  DetectChampion      →  TournamentCompleted          Tournament   Policy: final room match winner is
   Aggregate                                                                           the tournament champion; full standings
-                                                                                      determined
-                                          FinalStandingsPublished      Tournament
+                                                                                      determined (internal aggregate event)
+                                          FinalStandingsPublished      Tournament   Policy: integration event carrying
+                                                                                      final standings; published to Spectator
+                                                                                      and Ranking
 
 Tournament      →  CancelTournament    →  TournamentCancelled          Tournament   Policy: all further advancement stops
   Operator                                                                            immediately; in-flight results discarded
@@ -185,8 +195,8 @@ Ranking         →  ProcessCasualGameResult  →  EloUpdated               Play
 
 | Subdomain | Type | Justification |
 |---|---|---|
-| Game Engine (Room Play) | **Core** | Primary differentiator: turn logic, concurrency control, RNG fairness, penalty resolution, card validation, best-of-three match management. Highest business complexity. |
-| Tournament Management | **Core** | Bracket orchestration at massive scale, multi-round progression with top-3 advancement, saga-based coordination. Critical to the platform's competitive value. |
+| Game Engine (Room Play) | **Core** | Primary differentiator: turn logic, concurrency control, RNG fairness, penalty resolution, card validation, match management. Highest business complexity. |
+| Tournament Management | **Supporting** | Bracket orchestration and multi-round progression follow well-established elimination tournament patterns. Complex at scale but not the platform's primary differentiator — the game experience is. |
 | Ranking & Elo | **Supporting** | Important for competitive engagement but follows well-known Elo algorithms. Casual Elo and tournament placement are distinct but straightforward. |
 | Spectator & Live View | **Supporting** | Enables the viewing experience. Primarily a projection and delivery concern with moderate domain logic (view filtering, eligibility, privacy enforcement). |
 | Audit & Game History | **Generic** | Standard append-only logging and replay. No unique business logic — any event-sourced audit system would behave similarly. |
@@ -229,8 +239,8 @@ flowchart TB
     end
 
     %% Room Play → downstream (async domain events)
-    RoomPlay -->|"CS · async events<br/>MatchCompleted<br/>(U→D)"| Tournament
-    RoomPlay -->|"CS · async events<br/>GameCompleted<br/>(U→D)"| Ranking
+    RoomPlay -->|"CS · async events<br/>MatchResultPublished<br/>(U→D)"| Tournament
+    RoomPlay -->|"CS · async events<br/>GameResultPublished<br/>(U→D)"| Ranking
     RoomPlay -->|"CF · async events<br/>state changes<br/>(U→D)"| Spectator
     RoomPlay -->|"CF · async events<br/>state changes<br/>(U→D)"| Audit
 
@@ -267,8 +277,8 @@ flowchart TB
 
 **Relationships:**
 
-- **Room Play → Tournament** (Customer-Supplier, Published Language): Room Play publishes `MatchCompleted` events (with placement order). Tournament consumes them to determine top-3 advancers. Tournament applies an Anti-Corruption Layer to validate and deduplicate incoming results.
-- **Room Play → Ranking** (Customer-Supplier, Published Language): Room Play publishes `GameCompleted` events (casual games only, with placement order). Ranking consumes them for Elo updates. Ranking applies its own eligibility rules (ACL): only casual games, not abandoned.
+- **Room Play → Tournament** (Customer-Supplier, Published Language): Room Play publishes `MatchResultPublished` integration events (carrying the `MatchResult` value object with placement order). Tournament consumes them to determine top-3 advancers. Tournament applies an Anti-Corruption Layer to validate and deduplicate incoming results.
+- **Room Play → Ranking** (Customer-Supplier, Published Language): Room Play publishes `GameResultPublished` integration events (carrying the `GameResult` value object, casual games only, with placement order). Ranking consumes them for Elo updates. Ranking applies its own eligibility rules (ACL): only casual games, not abandoned.
 - **Room Play → Spectator & Live View** (Conformist, Published Language): Room Play publishes state change events. Spectator context builds read-only projections following Room Play's event schema. Privacy enforcement: spectator projections never include private hands.
 - **Room Play → Audit & Game History** (Conformist, Published Language): Room Play publishes all state changes. Audit appends them immutably.
 - **Tournament → Room Play** (Customer-Supplier): When a new round starts, Tournament publishes `RoundStarted` events requesting room creation for all matches in the round. When ≤10 players remain, it requests creation of the final room.
@@ -294,8 +304,8 @@ flowchart TB
 | **Sequence Number** | A monotonically increasing integer representing the authoritative version of a room's game state. Used for optimistic concurrency control. | Room Play |
 | **Challenge Window** | A 5-second window (or until the next turn starts, whichever is first) during which players may challenge a missed Uno call. Server-authoritative timestamps. | Room Play |
 | **Grace Timer** | The 60-second reconnection window after a player disconnects. Disconnected player's turns are skipped (passed). On expiry: casual room → player removed; tournament room → match loss. | Room Play |
-| **Game Result** | An immutable snapshot of a completed game: winner, card-point totals per player. Published to Ranking (casual only) and Audit. | Room Play, Ranking |
-| **Match Result** | An immutable snapshot of a completed match (best-of-three): match winner, game-win counts, placement order, cumulative card-point totals. Published to Tournament and Audit. | Room Play, Tournament |
+| **Game Result** | An immutable snapshot of a completed game: winner, card-point totals per player. Serves as the payload of the `GameResultPublished` integration event. Published to Ranking (casual only) and Audit. | Room Play, Ranking |
+| **Match Result** | An immutable snapshot of a completed match (best-of-three): match winner, game-win counts per player, placement order (1st through last), cumulative card-point totals. Serves as the payload of the `MatchResultPublished` integration event. Published to Tournament and Audit. | Room Play, Tournament |
 | **Bracket** | The elimination structure of a tournament. Players are grouped into rooms per round; top 3 per room advance. | Tournament |
 | **Player Slot** | A position within a bracket assigned to a specific player, including their seeding rank. | Tournament |
 | **Elo Rating** | A numeric skill rating for casual play, updated once per completed casual game based on placement order. | Ranking |
@@ -327,8 +337,8 @@ flowchart TB
 **Value Objects:**
 
 - `Card` — Immutable. Defined by `Color` (red, yellow, green, blue, wild) and `Face` (0–9, skip, reverse, draw-two, wild, wild-draw-four). Structural equality.
-- `GameResult` — Immutable snapshot at game completion: game winner, card-point totals per player.
-- `MatchResult` — Immutable snapshot at match completion: match winner, game-win counts per player, placement order (1st through last), cumulative card-point totals.
+- `GameResult` — Immutable snapshot at game completion: game winner, card-point totals per player. Serves as the payload of the `GameResultPublished` integration event.
+- `MatchResult` — Immutable snapshot at match completion: match winner, game-win counts per player, placement order (1st through last), cumulative card-point totals. Serves as the payload of the `MatchResultPublished` integration event.
 - `PlacementOrder` — Ordered list of players ranked by game wins within the match. Used for Elo and tournament advancement.
 - `SequenceNumber` — Monotonically increasing integer. Self-validating: must be non-negative and strictly greater than the previous value.
 - `RngSeed` — Immutable seed for the deterministic RNG of a game. Stored per game for replay and audit.
@@ -349,23 +359,42 @@ flowchart TB
 
 **Domain Events:**
 
+*Internal aggregate events (state transitions within Room Play):*
+
+| Event | Payload (conceptual) | Purpose |
+|---|---|---|
+| `RoomCreated` | roomId, configuration, hostPlayerId | Room initialized |
+| `PlayerJoined` | roomId, playerId | Player added to room |
+| `MatchStarted` | roomId, playerIds | Match lifecycle begins |
+| `GameStarted` | roomId, gameNumber, rngSeed | Game initialized within match |
+| `DeckShuffled` | roomId, gameNumber, rngSeed | Deck prepared with deterministic RNG |
+| `CardsDealt` | roomId, gameNumber, playerHands (private per player) | Initial hands distributed |
+| `InitialCardRevealed` | roomId, gameNumber, card | First discard pile card set |
+| `TurnStarted` | roomId, playerId, turnNumber, timeoutDeadline | Active turn begins |
+| `CardPlayed` | roomId, playerId, card, resultingState, sequenceNumber | Card placed on discard pile |
+| `DirectionReversed` | roomId, newDirection, sequenceNumber | Reverse card effect applied |
+| `TurnSkipped` | roomId, skippedPlayerId, sequenceNumber | Skip card effect applied |
+| `DrawPenaltyApplied` | roomId, targetPlayerId, cardCount, sequenceNumber | Draw-two or wild-draw-four effect applied |
+| `CardDrawn` | roomId, playerId, sequenceNumber | Player drew from draw pile |
+| `TurnAdvanced` | roomId, nextPlayerId, turnNumber | Turn passed to next player |
+| `UnoCallMade` | roomId, playerId, sequenceNumber | Player declared Uno |
+| `UnoCallChallenged` | roomId, challengerId, targetPlayerId, sequenceNumber | Challenge initiated |
+| `ChallengePenaltyApplied` | roomId, penaltyTargetId, cardCount, sequenceNumber | Penalty resolved (missed Uno → target draws 2; false challenge → challenger draws 2) |
+| `TurnTimedOut` | roomId, playerId, actionApplied (skip/pass) | Turn timer expired |
+| `PlayerDisconnected` | roomId, playerId, graceTimerDeadline | Disconnection detected |
+| `PlayerReconnected` | roomId, playerId | Player rejoined within grace window |
+| `PlayerForfeited` | roomId, playerId, reason, roomType (casual/tournament) | Grace timer expired or player eliminated |
+| `GameCompleted` | roomId, gameNumber, winner, cardPointTotals | Game ended within Room aggregate; triggers next game or match completion logic |
+| `MatchCompleted` | roomId, winner, gameWinCounts, placementOrder, cumulativeCardPoints | Match ended within Room aggregate; triggers room completion |
+
+*Integration events (published to downstream bounded contexts):*
+
 | Event | Payload (conceptual) | Consumers |
 |---|---|---|
-| `RoomCreated` | roomId, configuration, hostPlayerId | Spectator (projection setup) |
-| `PlayerJoined` | roomId, playerId | Spectator (update participant list) |
-| `MatchStarted` | roomId, playerIds | Spectator, Audit |
-| `GameStarted` | roomId, gameNumber, rngSeed | Spectator, Audit |
-| `CardPlayed` | roomId, playerId, card, resultingState, sequenceNumber | Spectator (live update), Audit (game log) |
-| `CardDrawn` | roomId, playerId, sequenceNumber | Spectator, Audit |
-| `UnoCallMade` | roomId, playerId, sequenceNumber | Spectator, Audit |
-| `UnoCallChallenged` | roomId, challengerId, targetPlayerId, penaltyApplied, penaltyTarget | Spectator, Audit |
-| `TurnAdvanced` | roomId, nextPlayerId, turnNumber | Spectator |
-| `TurnTimedOut` | roomId, playerId, actionApplied (skip/pass) | Spectator, Audit |
-| `PlayerDisconnected` | roomId, playerId, graceTimerDeadline | Spectator |
-| `PlayerReconnected` | roomId, playerId | Spectator |
-| `PlayerForfeited` | roomId, playerId, reason, roomType (casual/tournament) | Tournament (if tournament), Spectator, Audit |
-| `GameCompleted` | roomId, gameNumber, gameResult (winner, cardPointTotals) | Ranking (casual rooms only, for Elo), Audit |
-| `MatchCompleted` | roomId, matchResult (winner, gameWins, placementOrder, cumulativeCardPoints) | Tournament (top-3 advancement), Audit, Spectator |
+| `GameResultPublished` | roomId, gameNumber, gameResult (`GameResult` VO: winner, cardPointTotals, placementContext) | Ranking (casual rooms only, for Elo), Audit |
+| `MatchResultPublished` | roomId, matchResult (`MatchResult` VO: winner, gameWins, placementOrder, cumulativeCardPoints) | Tournament (top-3 advancement, if tournament room), Spectator (end state), Audit |
+
+*Note:* All internal events are also consumed by **Spectator** (for live projection updates) and **Audit** (for the immutable game log). The integration events above are specifically the cross-context events that carry value-object payloads and trigger domain logic in other bounded contexts.
 
 **Repository (domain interface):**
 
@@ -400,19 +429,31 @@ flowchart TB
 
 **Domain Events:**
 
+*Internal aggregate events:*
+
+| Event | Payload (conceptual) | Purpose |
+|---|---|---|
+| `TournamentCreated` | tournamentId, configuration | Tournament initialized |
+| `RegistrationOpened` | tournamentId | Registration window begins |
+| `PlayerRegistered` | tournamentId, playerId | Player enrolled |
+| `RegistrationClosed` | tournamentId | Registration window ends |
+| `BracketsGenerated` | tournamentId, roundNumber, roomAssignments | Bracket structure determined |
+| `MatchResultRecorded` | tournamentId, roomMatchId, matchResult, idempotencyKey | Ingested match result persisted (idempotent on {matchId, gameNumber, sequenceNumber}) |
+| `Top3Advanced` | tournamentId, roomMatchId, advancingPlayerIds | Top-3 advancers determined |
+| `PlayersEliminated` | tournamentId, roomMatchId, eliminatedPlayerIds | Non-top-3 players eliminated |
+| `RoundCompleted` | tournamentId, roundNumber | All rooms in round reported results |
+| `TournamentCompleted` | tournamentId, champion, finalStandings | Champion determined (internal) |
+| `TournamentCancelled` | tournamentId, reason | Tournament cancelled |
+
+*Integration events (published to downstream bounded contexts):*
+
 | Event | Payload (conceptual) | Consumers |
 |---|---|---|
-| `TournamentCreated` | tournamentId, configuration | Spectator |
-| `RegistrationOpened` | tournamentId | Spectator |
-| `PlayerRegistered` | tournamentId, playerId | Spectator |
-| `BracketsGenerated` | tournamentId, roundNumber, roomAssignments | Spectator |
 | `RoundStarted` | tournamentId, roundNumber, roomMatchIds | Room Play (room creation), Spectator |
-| `Top3Advanced` | tournamentId, roomMatchId, advancingPlayerIds | Spectator |
-| `PlayersEliminated` | tournamentId, roomMatchId, eliminatedPlayerIds | Spectator |
-| `RoundCompleted` | tournamentId, roundNumber | Spectator |
-| `FinalRoomCreated` | tournamentId, playerIds | Room Play, Spectator |
-| `TournamentCompleted` | tournamentId, champion, finalStandings | Spectator, Ranking |
-| `TournamentCancelled` | tournamentId, reason | Spectator, Ranking (stops processing) |
+| `FinalRoomCreated` | tournamentId, playerIds | Room Play (final room creation), Spectator |
+| `FinalStandingsPublished` | tournamentId, champion, finalStandings | Spectator, Ranking (tournament-placement rating update) |
+
+*Note:* Internal events are also consumed by **Spectator** for tournament bracket projection updates.
 
 **Repository (domain interface):**
 
@@ -446,6 +487,7 @@ flowchart TB
 | Event | Payload (conceptual) | Consumers |
 |---|---|---|
 | `EloUpdated` | playerId, gameId, previousRating, newRating, delta, placement | Spectator (leaderboard refresh) |
+| `RatingHistoryAppended` | playerId, gameId, entryType (casual/tournament), previousRating, newRating, delta, timestamp | Spectator (player profile history) |
 
 **Repository (domain interface):**
 
@@ -522,10 +564,10 @@ This context is projection-oriented; it does not own authoritative game state.
 2. **Players** send `JoinRoom` → Room validates capacity (2–10) → emits `PlayerJoined` per player (async → Spectator updates participant list).
 3. **Host** sends `StartMatch` → Room validates min players reached → emits `MatchStarted` (async → Spectator, Audit).
 4. **System** starts game 1 → Room initializes deck with RNG seed, deals cards, reveals initial card → emits `GameStarted`, `DeckShuffled`, `CardsDealt`, `InitialCardRevealed`, `TurnStarted` (async → Spectator builds initial projection, Audit logs all).
-5. **Players take turns** (synchronous decision point): each `PlayCard`/`DrawCard`/`CallUno`/`ChallengeUnoCall` command is validated synchronously against authoritative state with sequence number check → emits corresponding events (async → Spectator delivers patches, Audit appends).
-6. A player empties their hand → Room detects game winner, calculates card-point totals → emits `GameCompleted` (async → Ranking processes Elo for casual rooms, Audit records).
+5. **Players take turns** (synchronous decision point): each `PlayCard`/`DrawCard`/`CallUno`/`ChallengeUnoCall` command is validated synchronously against authoritative state with sequence number check → emits corresponding events (async → Spectator delivers patches, Audit appends). Special card effects emit `DirectionReversed`, `TurnSkipped`, or `DrawPenaltyApplied` as applicable.
+6. A player empties their hand → Room detects game winner, calculates card-point totals → emits `GameCompleted` (internal aggregate event) followed by `GameResultPublished` (integration event → Ranking processes Elo for casual rooms, Audit records).
 7. If no player has 2 game wins yet → System starts next game (return to step 4, game 2 or 3).
-8. A player reaches 2 game wins → Room calculates placement order → emits `MatchCompleted` (async → Tournament ingests result for advancement if tournament room, Audit records final result, Spectator shows end state).
+8. A player reaches 2 game wins → Room calculates placement order → emits `MatchCompleted` (internal aggregate event) followed by `MatchResultPublished` (integration event → Tournament ingests result for advancement if tournament room, Audit records final result, Spectator shows end state).
 9. Room transitions to `completed` and rejects all further commands.
 
 ### 4.2 Tournament Round Advancement (end-to-end)
@@ -533,22 +575,22 @@ This context is projection-oriented; it does not own authoritative game state.
 1. **TournamentOperator** creates and opens tournament → `TournamentCreated`, `RegistrationOpened` (async → Spectator).
 2. **Players** register → `PlayerRegistered` per player.
 3. **Operator** closes registration → `RegistrationClosed`.
-4. **System** generates brackets → groups players into rooms of up to 10 → emits `BracketsGenerated`, `RoundStarted`, `MatchesScheduled` (async → Room Play creates rooms).
+4. **System** generates brackets → groups players into rooms of up to 10 → emits `BracketsGenerated`, `RoundStarted` (async → Room Play creates rooms).
 5. Room Play runs best-of-three matches in parallel across all rooms.
-6. As each room completes, Room Play emits `MatchCompleted` with placement order (asynchronous propagation to Tournament).
-7. **Tournament** consumes `MatchCompleted` (synchronous decision point): validates idempotency key, checks tournament isn't cancelled, determines top-3 advancers using tie-breaking rules → emits `Top3Advanced`, `PlayersEliminated`, and (when all rooms report) `RoundCompleted`.
+6. As each room completes, Room Play emits `MatchResultPublished` with the `MatchResult` value object containing placement order (asynchronous propagation to Tournament).
+7. **Tournament** consumes `MatchResultPublished` (synchronous decision point): validates idempotency key, checks tournament isn't cancelled, records result (`MatchResultRecorded`), determines top-3 advancers using tie-breaking rules → emits `Top3Advanced`, `PlayersEliminated`, and (when all rooms report) `RoundCompleted`.
 8. If >10 players remain → return to step 4 for next round.
 9. If ≤10 players remain → emits `FinalRoomCreated` (async → Room Play creates the final room).
-10. Final room completes → `MatchCompleted` → Tournament determines champion → `TournamentCompleted` with final standings.
+10. Final room completes → `MatchResultPublished` → Tournament determines champion → `TournamentCompleted` (internal) followed by `FinalStandingsPublished` (integration event → Spectator, Ranking for tournament-placement rating).
 
 ### 4.3 Elo/Ranking Update After Game Completion
 
-1. Room Play emits `GameCompleted` with gameId, room type (casual/tournament), game winner, card-point totals, and placement context.
-2. **Ranking** consumes the event (asynchronous propagation).
+1. Room Play emits `GameResultPublished` carrying the `GameResult` value object: gameId, room type (casual/tournament), game winner, card-point totals, and placement context.
+2. **Ranking** consumes the integration event (asynchronous propagation).
 3. Ranking checks eligibility (synchronous decision point): Is it a casual game? Is it abandoned (forfeit by all)? → If not eligible, event is discarded.
 4. Ranking checks idempotency key `{gameId, sequenceNumber}` → If duplicate, silently discarded.
 5. Ranking calculates Elo delta based on placement order (1st through last) within the room using weighted formula.
-6. Ranking applies update to `PlayerRanking` aggregate for each player → emits `EloUpdated` per player (async → Spectator refreshes leaderboard).
+6. Ranking applies update to `PlayerRanking` aggregate for each player → emits `EloUpdated` and `RatingHistoryAppended` per player (async → Spectator refreshes leaderboard and player profile history).
 
 ---
 
@@ -570,7 +612,7 @@ The system detects the disconnect → emits `PlayerDisconnected` with grace time
 
 **Scenario B — Grace timer expires:**
 
-After 60 seconds with no reconnection, the system issues an automatic forfeit → emits `PlayerForfeited`. In a casual room, the player is removed and the game continues with remaining players. In a tournament room, the player receives a match loss and is eliminated from the tournament → the match ends and emits `MatchCompleted` with the remaining player as winner.
+After 60 seconds with no reconnection, the system issues an automatic forfeit → emits `PlayerForfeited`. In a casual room, the player is removed and the game continues with remaining players. In a tournament room, the player receives a match loss and is eliminated from the tournament → the match ends and emits `MatchCompleted` (internal) followed by `MatchResultPublished` (integration event to Tournament, Audit, Spectator) with the remaining player as winner.
 
 **Scenario C — Late rejoin (after grace timer expiry):**
 
@@ -588,7 +630,7 @@ The player attempts to reconnect after the 60-second window has closed. The room
 
 **Scenario A — Room completes but Tournament doesn't receive the event:**
 
-Room Play emits `MatchCompleted`. If the event bus loses the event or Tournament crashes before processing it, the event remains in the event bus for redelivery (at-least-once delivery assumption). Tournament's idempotency key prevents double-processing on retry.
+Room Play emits `MatchResultPublished`. If the event bus loses the event or Tournament crashes before processing it, the event remains in the event bus for redelivery (at-least-once delivery assumption). Tournament's idempotency key prevents double-processing on retry.
 
 **Scenario B — Tournament crashes mid-advancement (after recording result, before advancing players):**
 
@@ -596,7 +638,7 @@ The saga pattern ensures each step is idempotent. On restart, Tournament re-read
 
 **Scenario C — Ranking fails to process a game result:**
 
-The event remains available for reprocessing. Ranking's idempotency key ensures no double Elo updates. The leaderboard may show stale data temporarily (eventual consistency is acceptable for rankings).
+The `GameResultPublished` event remains available for reprocessing. Ranking's idempotency key ensures no double Elo updates. The leaderboard may show stale data temporarily (eventual consistency is acceptable for rankings).
 
 **Scenario D — Audit service is down:**
 
@@ -661,8 +703,8 @@ Tournament round advancement is a multi-step process: result ingestion → top-3
 ### 6.4 Recovery from Context-Level Failures
 
 - **Room Play failure:** The room's last committed state (event log) is the recovery point. On restart, the room aggregate is reconstructed from the event log. In-flight commands that were not acknowledged are retried by clients (who will detect stale sequence numbers if the command was already processed).
-- **Tournament failure:** Idempotent saga replay from the event bus. Unprocessed `MatchCompleted` events are redelivered and processed.
-- **Ranking failure:** Events accumulate in the bus; on recovery, Ranking processes the backlog. Idempotency keys prevent double updates.
+- **Tournament failure:** Idempotent saga replay from the event bus. Unprocessed `MatchResultPublished` events are redelivered and processed.
+- **Ranking failure:** `GameResultPublished` events accumulate in the bus; on recovery, Ranking processes the backlog. Idempotency keys prevent double updates.
 - **Spectator failure:** Projections are rebuilt from Room Play events. Clients reconnect and request a snapshot, then resume receiving patches.
 - **Audit failure:** Events accumulate; on recovery, the backlog is appended. Sequence numbers ensure correct ordering.
 
@@ -684,11 +726,11 @@ Tournament advancement follows a saga pattern: result ingestion → top-3 determ
 
 ### 7.4 Eventual consistency between Game and Tournament contexts
 
-When a match completes, the Room Play context publishes the result as a domain event. The Tournament context consumes it asynchronously. Bracket state is eventually consistent with match outcomes — acceptable because bracket advancement is not time-critical. The authoritative advancement decision is always made against the write-side state, never the read-optimized projection.
+When a match completes, the Room Play context publishes the result as a `MatchResultPublished` integration event. The Tournament context consumes it asynchronously. Bracket state is eventually consistent with match outcomes — acceptable because bracket advancement is not time-critical. The authoritative advancement decision is always made against the write-side state, never the read-optimized projection.
 
 ### 7.5 Asynchronous Elo calculation (CQRS)
 
-Ranking updates are computed asynchronously from game result events, producing a read-optimized leaderboard. This decouples the latency-sensitive gameplay path from ranking recalculation. Rankings are a read model — they don't need to be consistent at the moment a game ends, only eventually correct.
+Ranking updates are computed asynchronously from `GameResultPublished` integration events, producing a read-optimized leaderboard. This decouples the latency-sensitive gameplay path from ranking recalculation. Rankings are a read model — they don't need to be consistent at the moment a game ends, only eventually correct.
 
 ### 7.6 Immutable audit log for game integrity
 
@@ -701,6 +743,10 @@ The live view system builds separate projections for players (who see their own 
 ### 7.8 Disconnection and reconnection as domain-level concerns
 
 Disconnection is handled within the game domain, not as an infrastructure concern. The room aggregate manages the 60-second grace timer and skips the disconnected player's turns (no bot substitution). On reconnection, the player receives a delta from their last known sequence number. Forfeit behavior differs by room type (casual vs. tournament).
+
+### 7.9 Internal events vs integration events
+
+Domain events within the Room Play context are split into two categories: **internal aggregate events** (`GameCompleted`, `MatchCompleted`) that drive state transitions within the aggregate, and **integration events** (`GameResultPublished`, `MatchResultPublished`) that carry immutable value-object payloads to downstream bounded contexts. This separation ensures that internal state transitions can evolve independently from the published contract consumed by Tournament, Ranking, and Audit.
 
 ---
 
