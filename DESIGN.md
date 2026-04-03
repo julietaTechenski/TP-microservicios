@@ -217,12 +217,12 @@ Ranking         →  ProcessCasualGameResult  →  EloUpdated               Play
 
 ```mermaid
 flowchart TB
-    subgraph Core["🔴 CORE DOMAIN"]
+    subgraph Core["CORE DOMAIN"]
         RoomPlay["Room Play<br/>(Core Domain)"]
-        style RoomPlay fill:#ff4444,stroke:#cc0000,color:#fff,stroke-width:3px
+        style RoomPlay fill:#ff4444,stroke:#cc0000,color:#000,stroke-width:3px
     end
 
-    subgraph Supporting["🟡 SUPPORTING DOMAINS"]
+    subgraph Supporting["SUPPORTING DOMAINS"]
         Tournament["Tournament<br/>(Supporting Domain)"]
         Ranking["Ranking<br/>(Supporting Domain)"]
         Spectator["Spectator & Live View<br/>(Supporting Domain)"]
@@ -231,32 +231,32 @@ flowchart TB
         style Spectator fill:#ffaa44,stroke:#ff8800,color:#000,stroke-width:2px
     end
 
-    subgraph Generic["⚪ GENERIC DOMAINS"]
+    subgraph Generic["GENERIC DOMAINS"]
         Audit["Audit & Game History<br/>(Generic Domain)"]
         Identity["Identity & Session<br/>(Generic Domain)"]
-        style Audit fill:#cccccc,stroke:#666666,color:#000,stroke-width:2px
-        style Identity fill:#cccccc,stroke:#666666,color:#000,stroke-width:2px
+        style Audit fill:#5068cc,stroke:#666666,color:#000,stroke-width:2px
+        style Identity fill:#5068cc,stroke:#666666,color:#000,stroke-width:2px
     end
 
-    %% Room Play → downstream (async domain events)
+%% Room Play → downstream (async domain events)
     RoomPlay -->|"CS · async events<br/>MatchResultPublished<br/>(U→D)"| Tournament
     RoomPlay -->|"CS · async events<br/>GameResultPublished<br/>(U→D)"| Ranking
     RoomPlay -->|"CF · async events<br/>state changes<br/>(U→D)"| Spectator
     RoomPlay -->|"CF · async events<br/>state changes<br/>(U→D)"| Audit
 
-    %% Tournament → Room Play (room creation for rounds)
+%% Tournament → Room Play (room creation for rounds)
     Tournament -->|"CS · async events<br/>RoundStarted<br/>(U→D)"| RoomPlay
 
-    %% Identity → consumers (auth, consulted via OHS)
+%% Identity → consumers (auth, consulted via OHS)
     Identity -->|"OHS · sync query<br/>token validation<br/>+ session.expired<br/>(U→D)"| RoomPlay
     Identity -->|"OHS · sync query<br/>token & authz<br/>(U→D)"| Spectator
     Identity -->|"OHS · sync query<br/>token & role<br/>(U→D)"| Tournament
     Identity -->|"OHS · sync query<br/>token validation<br/>(U→D)"| Ranking
 
-    %% Ranking → Tournament (optional seeding query)
+%% Ranking → Tournament (optional seeding query)
     Ranking -.->|"Sync query<br/>elo-based seeding<br/>(U→D) [Optional]"| Tournament
 
-    subgraph Legend["📋 LEGEND"]
+    subgraph Legend["LEGEND"]
         L1["U = Upstream · D = Downstream"]
         L2["CS = Customer-Supplier · CF = Conformist"]
         L3["OHS = Open Host Service · ACL = Anti-Corruption Layer"]
@@ -269,10 +269,10 @@ flowchart TB
         style L5 fill:#f0f0f0,stroke:#333,color:#000
     end
 
-    style Core fill:#ffe6e6,stroke:#cc0000,stroke-width:2px
-    style Supporting fill:#ffe8cc,stroke:#ff8800,stroke-width:2px
-    style Generic fill:#f0f0f0,stroke:#666666,stroke-width:2px
-    style Legend fill:#fafafa,stroke:#999,stroke-width:2px
+    style Core fill:#ffe6e6,stroke:#cc0000,color:#000,stroke-width:2px
+    style Supporting fill:#ffe8cc,stroke:#ff8800,color:#000,stroke-width:2px
+    style Generic fill:#9daef2,stroke:#5068cc,color:#000,stroke-width:2px
+    style Legend fill:#fafafa,stroke:#999,color:#000,stroke-width:2px
 ```
 
 **Relationships:**
@@ -287,38 +287,38 @@ flowchart TB
 
 ### 2.4 Ubiquitous Language
 
-| Term | Definition | Owning Context(s) |
-|---|---|---|
-| **Game** | A single Uno game within a room: cards are dealt, turns are played, and one player wins by emptying their hand. Multiple games form a match. | Room Play |
-| **Match** | A **best-of-three series** of games within a room. The match winner is the first player to win 2 games. In Tournament context: the match also determines placement order for advancement. | Room Play, Tournament |
-| **Room** | A game instance with 2–10 players that hosts a match (best-of-three). Has a lifecycle: waiting → in_progress → completed/cancelled. | Room Play |
-| **Round** | One elimination tier in a tournament. All rooms in a round play their matches concurrently. All must complete before the next round begins. | Tournament |
-| **Tournament** | A multi-round elimination competition. Rounds continue until ≤10 players remain, then a final room determines the champion. Lifecycle: planned → open_for_registration → in_progress → completed/cancelled. | Tournament |
-| **Placement Order** | The ranking of all players in a room at match end (1st through last), based on game wins. Used by Ranking for Elo calculation and by Tournament for top-3 advancement. | Room Play, Tournament, Ranking |
-| **Player** | In Room Play: an active participant holding a hand of cards. In Ranking: a rated entity with Elo and tournament-placement history. In Identity: a role claim on a user account. | Room Play, Ranking, Identity |
-| **Turn** | The active period during which a single player may submit actions. Bounded by a timeout deadline. | Room Play |
-| **Card** | An immutable game piece defined by Color and Face. Two cards with identical attributes are interchangeable (structural equality). | Room Play |
-| **Hand** | The set of Cards held by a Player. Private to the owning player; never exposed to spectators or other players. | Room Play, Spectator |
-| **Discard Pile** | The shared stack of played cards. Only the top card is relevant for determining play legality. | Room Play |
-| **Draw Pile** | The shared deck from which players draw. Managed server-side with deterministic RNG. | Room Play |
-| **Sequence Number** | A monotonically increasing integer representing the authoritative version of a room's game state. Used for optimistic concurrency control. | Room Play |
-| **Challenge Window** | A 5-second window (or until the next turn starts, whichever is first) during which players may challenge a missed Uno call. Server-authoritative timestamps. | Room Play |
-| **Grace Timer** | The 60-second reconnection window after a player disconnects. Disconnected player's turns are skipped (passed). On expiry: casual room → player removed; tournament room → match loss. | Room Play |
-| **Game Result** | An immutable snapshot of a completed game: winner, card-point totals per player. Serves as the payload of the `GameResultPublished` integration event. Published to Ranking (casual only) and Audit. | Room Play, Ranking |
-| **Match Result** | An immutable snapshot of a completed match (best-of-three): match winner, game-win counts per player, placement order (1st through last), cumulative card-point totals. Serves as the payload of the `MatchResultPublished` integration event. Published to Tournament and Audit. | Room Play, Tournament |
-| **Bracket** | The elimination structure of a tournament. Players are grouped into rooms per round; top 3 per room advance. | Tournament |
-| **Player Slot** | A position within a bracket assigned to a specific player, including their seeding rank. | Tournament |
-| **Elo Rating** | A numeric skill rating for casual play, updated once per completed casual game based on placement order. | Ranking |
-| **Tournament-Placement Rating** | A separate rating reflecting tournament performance, distinct from global Elo. | Ranking |
-| **Spectator** | A user observing a room without participating. Receives only the public projection. Must be authorized for private rooms/tournaments. | Spectator, Identity |
-| **Player View** | The projection sent to an active player: includes their private hand plus all public state. | Spectator |
-| **Spectator View** | The projection sent to spectators: public state only (player names, card counts, discard pile, turn info). No hands, no RNG seed. | Spectator |
-| **State Patch** | An incremental delta representing a single state transition, delivered to connected clients. | Spectator |
-| **Game Log** | The immutable, append-only record of every state change in a game. Supports replay and dispute resolution. | Audit |
-| **Game Log Entry** | A single record: event type, timestamp, player ID, sequence number, RNG seed reference. | Audit |
-| **Session** | An authenticated user session. Only one active session per player. Expiry during an active game triggers the 60-second grace timer flow. | Identity, Room Play |
-| **Idempotency Key** | A composite value used by all event consumers to deduplicate events and prevent double-processing. | Cross-cutting |
-| **Correlation ID** | A unique identifier attached to every domain event, traceable from the originating action through to the audit log. | Cross-cutting |
+| Term | Definition                                                                                                                                                                                                                                                                                                                                            | Owning Context(s) |
+|---|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---|
+| **Game** | A single Uno game within a room: cards are dealt, turns are played, and one player wins by emptying their hand. Multiple games form a match.                                                                                                                                                                                                          | Room Play |
+| **Match** | A best-of-three series of games played within a room of up to 10 players.  After three games, players are ranked by: (1) games won (descending), (2) cumulative card-point total (ascending) among tied players, and (3) earliest final-game completion timestamp. In tournament rooms, the top 3 advance to the next round; the rest are eliminated. | Room Play, Tournament |
+| **Room** | A game instance with 2–10 players that hosts a match (best-of-three). Has a lifecycle: waiting → in_progress → completed/cancelled.                                                                                                                                                                                                                   | Room Play |
+| **Round** | One elimination tier in a tournament. All rooms in a round play their matches concurrently. All must complete before the next round begins.                                                                                                                                                                                                           | Tournament |
+| **Tournament** | A multi-round elimination competition. Rounds continue until ≤10 players remain, then a final room determines the champion. Lifecycle: planned → open_for_registration → in_progress → completed/cancelled.                                                                                                                                           | Tournament |
+| **Placement Order** | The ranking of all players in a room at match end (1st through last), based on game wins. Used by Ranking for Elo calculation and by Tournament for top-3 advancement.                                                                                                                                                                                | Room Play, Tournament, Ranking |
+| **Player** | In Room Play: an active participant holding a hand of cards. In Ranking: a rated entity with Elo and tournament-placement history. In Identity: a role claim on a user account.                                                                                                                                                                       | Room Play, Ranking, Identity |
+| **Turn** | The active period during which a single player may submit actions. Bounded by a timeout deadline.                                                                                                                                                                                                                                                     | Room Play |
+| **Card** | An immutable game piece defined by Color and Face. Two cards with identical attributes are interchangeable.                                                                                                                                                                                                                                           | Room Play |
+| **Hand** | The set of Cards held by a Player. Private to the owning player; never exposed to spectators or other players.                                                                                                                                                                                                                                        | Room Play, Spectator |
+| **Discard Pile** | The shared stack of played cards. Only the top card is relevant for determining play legality.                                                                                                                                                                                                                                                        | Room Play |
+| **Draw Pile** | The shared deck from which players draw. Managed server-side with deterministic RNG.                                                                                                                                                                                                                                                                  | Room Play |
+| **Sequence Number** | A monotonically increasing integer representing the authoritative version of a room's game state. Used for optimistic concurrency control.                                                                                                                                                                                                            | Room Play |
+| **Challenge Window** | A 5-second window (or until the next turn starts, whichever is first) during which players may challenge a missed Uno call. Server-authoritative timestamps.                                                                                                                                                                                          | Room Play |
+| **Grace Timer** | The 60-second reconnection window after a player disconnects. Disconnected player's turns are skipped (passed). On expiry: casual room → player removed; tournament room → match loss.                                                                                                                                                                | Room Play |
+| **Game Result** | An immutable snapshot of a completed game: winner, card-point totals per player. Serves as the payload of the `GameResultPublished` integration event. Published to Ranking (casual only) and Audit.                                                                                                                                                  | Room Play, Ranking |
+| **Match Result** | An immutable snapshot of a completed match (best-of-three): match winner, game-win counts per player, placement order (1st through last), cumulative card-point totals. Serves as the payload of the `MatchResultPublished` integration event. Published to Tournament and Audit.                                                                     | Room Play, Tournament |
+| **Bracket** | The elimination structure of a tournament. Players are grouped into rooms per round; top 3 per room advance.                                                                                                                                                                                                                                          | Tournament |
+| **Player Slot** | A position within a bracket assigned to a specific player, including their initial aleatory rank.                                                                                                                                                                                                                                                     | Tournament |
+| **Elo Rating** | A numeric skill rating for casual play, updated once per completed casual game based on placement order.                                                                                                                                                                                                                                              | Ranking |
+| **Tournament-Placement Rating** | A separate rating reflecting tournament performance, distinct from global Elo.                                                                                                                                                                                                                                                                        | Ranking |
+| **Spectator** | A user observing a room without participating. Receives only the public projection. Must be authorized for private rooms/tournaments.                                                                                                                                                                                                                 | Spectator, Identity |
+| **Player View** | The projection sent to an active player: includes their private hand plus all public state.                                                                                                                                                                                                                                                           | Spectator |
+| **Spectator View** | The projection sent to spectators: public state only (player names, card counts, discard pile, turn info). No hands, no RNG seed.                                                                                                                                                                                                                     | Spectator |
+| **State Patch** | An incremental delta representing a single state transition, delivered to connected clients.                                                                                                                                                                                                                                                          | Spectator |
+| **Game Log** | The immutable, append-only record of every state change in a game. Supports replay and dispute resolution.                                                                                                                                                                                                                                            | Audit |
+| **Game Log Entry** | A single record: event type, timestamp, player ID, sequence number, RNG seed reference.                                                                                                                                                                                                                                                               | Audit |
+| **Session** | An authenticated user session. Only one active session per player. Expiry during an active game triggers the 60-second grace timer flow.                                                                                                                                                                                                              | Identity, Room Play |
+| **Idempotency Key** | A composite value used by all event consumers to deduplicate events and prevent double-processing.                                                                                                                                                                                                                                                    | Cross-cutting |
+| **Correlation ID** | A unique identifier attached to every domain event, traceable from the originating action through to the audit log.                                                                                                                                                                                                                                   | Cross-cutting |
 
 ---
 
@@ -754,14 +754,15 @@ Domain events within the Room Play context are split into two categories: **inte
 
 ### 8.1 Assumptions
 
-| # | Assumption | Rationale |
-|---|---|---|
-| A1 | **At-least-once delivery** for domain events between contexts. | Idempotency keys at all consumers make this safe. Exactly-once would simplify consumers but is harder to guarantee. |
-| A2 | **Event ordering is guaranteed within a single room's event stream** but not globally across rooms. | Per-room ordering is sufficient for game integrity. Global ordering is unnecessary and would be a bottleneck. |
-| A3 | **Server clock is authoritative** for all time-sensitive decisions (challenge window, grace timer, turn timeout). | Client clocks are untrusted. All timing decisions use server-side timestamps. |
-| A4 | **Card-point totals** follow standard Uno scoring: number cards = face value, action cards = 20 points, wild cards = 50 points. | Used for tie-breaking in tournaments. The specific scoring rule needs confirmation with stakeholders. |
-| A5 | **Deterministic RNG** means the same seed always produces the same shuffle/draw sequence. | Required for audit replay. The specific PRNG algorithm is an implementation detail. |
-| A6 | **Rate limit thresholds** (per IP, per user, per action) are configurable and will be tuned based on load testing. | Specific values are an operational concern, not a domain design decision. |
+| #  | Assumption                                                                                                                                                                                              | Rationale                                                                                                                                                        |
+|----|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| A1 | **At-least-once delivery** for domain events between contexts.                                                                                                                                          | Idempotency keys at all consumers make this safe. Exactly-once would simplify consumers but is harder to guarantee.                                              |
+| A2 | **Event ordering is guaranteed within a single room's event stream** but not globally across rooms.                                                                                                     | Per-room ordering is sufficient for game integrity. Global ordering is unnecessary and would be a bottleneck.                                                    |
+| A3 | **Server clock is authoritative** for all time-sensitive decisions (challenge window, grace timer, turn timeout).                                                                                       | Client clocks are untrusted. All timing decisions use server-side timestamps.                                                                                    |
+| A4 | **Card-point totals** follow standard Uno scoring: number cards = face value, action cards = 20 points, wild cards = 50 points.                                                                         | Used for tie-breaking in tournaments. The specific scoring rule needs confirmation with stakeholders.                                                            |
+| A5 | **Deterministic RNG** means the same seed always produces the same shuffle/draw sequence.                                                                                                               | Required for audit replay. The specific PRNG algorithm is an implementation detail.                                                                              |
+| A6 | **Rate limit thresholds** (per IP, per user, per action) are configurable and will be tuned based on load testing.                                                                                      | Specific values are an operational concern, not a domain design decision.                                                                                        |
+| A7 | **Casual (ad-hoc) rooms** consist of a single game. The best-of-three match structure applies exclusively to tournament rooms. If the host of a casual room wants to play again, they create a new room | The assignment only references "best-of-three series" within the tournament progression rules section, and that Elo updates are defined per game, not per match. |
 
 ### 8.2 Open Questions
 
