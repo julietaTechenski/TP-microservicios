@@ -247,11 +247,17 @@ flowchart TB
 %% Tournament → Room Play (room creation for rounds)
     Tournament -->|"CS · async events<br/>RoundStarted<br/>(U→D)"| RoomPlay
 
+%% Tournament → Audit (operational audit)
+    Tournament -->|"CF · async events<br/>TournamentCancelled<br/>(U→D)"| Audit
+
 %% Identity → consumers (auth, consulted via OHS)
     Identity -->|"OHS · sync query<br/>token validation<br/>+ session.expired<br/>(U→D)"| RoomPlay
     Identity -->|"OHS · sync query<br/>token & authz<br/>(U→D)"| Spectator
     Identity -->|"OHS · sync query<br/>token & role<br/>(U→D)"| Tournament
     Identity -->|"OHS · sync query<br/>token validation<br/>(U→D)"| Ranking
+
+%% Identity → Audit (security audit)
+    Identity -->|"CF · async events<br/>LoginAttempted<br/>SessionInvalidated<br/>RoleChanged<br/>(U→D)"| Audit
 
 %% Ranking → Tournament (optional seeding query)
     Ranking -.->|"Sync query<br/>elo-based seeding<br/>(U→D) [Optional]"| Tournament
@@ -555,6 +561,27 @@ This context is projection-oriented; it does not own authoritative game state.
 - Session expiry during an active game triggers the 60-second grace timer flow in Room Play.
 
 ---
+### 3.8 Audit Information
+**Aggregate Root: `SystemAuditLog`**:Append-only record of sensitive operations outside gameplay such us as Login. Role changed, Tournament cancelled, etc. Only supports append operations. 
+
+**Entities:** None. The aggregate is purely append-only.
+
+**Value Objects:** 
+`SystemAuditEntry` — Immutable. Contains `entryId`, `eventType`, `actorId`, `serverTimestamp`, `metadata`.
+`RetentionPolicy` — defines retention duration based on entry sensitivity tier (security events retained longer than operational events).
+
+**Invariants**:
+
+Entries are append-only, no mutation or deletion within the retention period.
+Every entry must have a non-null `actorId`.
+`eventType` must belong to an events Enum; unknown types are rejected at the boundary.
+Entries from `Identity` (login, session, role changes) and `Tournament` (cancellations) are accepted.
+
+**Repository**:
+`appendEntry(SystemAuditEntry)` → void
+`findEntriesByActor(actorId, timeRange)` → List\<SystemAuditEntry\>
+`findEntriesByTarget(targetId, timeRange)` → List\<SystemAuditEntry\>
+`findEntriesByType(eventType, timeRange)` → List\<SystemAuditEntry\>
 
 ## 4. Domain Event Flow Narratives
 
