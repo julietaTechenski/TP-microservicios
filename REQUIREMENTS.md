@@ -207,7 +207,7 @@ The platform must be the **authoritative source of truth** for gameplay state, t
 - **DR-10**: A tournament match result must not be applied more than once to advancement or ranking.
 - **DR-11**: A cancelled tournament must not continue advancing players after cancellation becomes effective.
 - **DR-12**: A disconnected player remains part of the game. Their turns are skipped (passed) during the 60-second grace window. Forfeit occurs only on window expiry.
-- **DR-13**: A match consists of a best-of-three series of games. The match winner is the first player to win 2 games.
+- **DR-13**: A match consists of a best-of-three series of games.
 - **DR-14**: Tournament rounds continue until 10 or fewer players remain, at which point a final room determines the champion.
 - **DR-15**: Each player may have only one active session at a time. A new login invalidates the previous session.
 - **DR-16**: All card shuffling, draws, and random outcomes must be generated server-side with a deterministic seeded RNG. The seed must be stored per game for audit replay.
