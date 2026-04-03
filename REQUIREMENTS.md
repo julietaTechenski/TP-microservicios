@@ -30,31 +30,9 @@ The platform must be the **authoritative source of truth** for gameplay state, t
 
 ---
 
-## 3. Bounded Contexts
+## 3. Functional Requirements
 
-### 3.1 Room Play Context
-Responsible for ad-hoc room creation, player participation, turn progression, card actions, penalties, game lifecycle, and match lifecycle (best-of-three series).
-
-### 3.2 Tournament Context
-Responsible for tournament registration, bracket progression, round lifecycle, room-level match results, top-3 advancement, eliminations, and final standings.
-
-### 3.3 Ranking Context
-Responsible for global Elo rating (casual games only), tournament-placement rating, and rating history.
-
-### 3.4 Spectator & Live View Context
-Responsible for live state visibility for players and spectators.
-
-### 3.5 Audit & Game History Context
-Responsible for immutable game history, replayability, and dispute support.
-
-### 3.6 Identity & Session Context
-Responsible for authentication, single-active-session enforcement, session lifecycle, and role-based access control.
-
----
-
-## 4. Functional Requirements
-
-### 4.1 Global Functional Requirements
+### 3.1 Global Functional Requirements
 
 - **FR-G1**: The system must allow registered users to participate as players and, when authorized, as spectators.
 - **FR-G2**: The system must provide real-time visibility of relevant game and tournament state changes.
@@ -62,7 +40,7 @@ Responsible for authentication, single-active-session enforcement, session lifec
 - **FR-G4**: The system must ensure competitive fairness by rejecting invalid or unauthorized state transitions.
 - **FR-G5**: The system must preserve consistency across gameplay, tournament progression, ranking updates, and audit history.
 
-### 4.2 Room Play Context
+### 3.2 Room Play Context
 
 **Room & Match Lifecycle:**
 
@@ -110,7 +88,7 @@ Responsible for authentication, single-active-session enforcement, session lifec
 - **FR-R17**: The system must define timeout rules for player turns.
 - **FR-R18**: The system must define the business behavior for abandoned or stalled matches.
 
-### 4.3 Tournament Context
+### 3.3 Tournament Context
 
 - **FR-T1**: The system must allow tournament creation and configuration.
 - **FR-T2**: The system must allow player registration during the permitted enrollment period.
@@ -128,7 +106,7 @@ Responsible for authentication, single-active-session enforcement, session lifec
 - **FR-T14**: The system must define the business behavior for tournament cancellation.
 - **FR-T15**: The system must define the business behavior for interrupted tournament progression and recovery.
 
-### 4.4 Ranking Context
+### 3.4 Ranking Context
 
 - **FR-K1**: The system must maintain a **global Elo-based ranking** that applies to **casual (ad-hoc) rooms only**.
 - **FR-K2**: Tournament play uses a **separate tournament-placement rating**, not the global Elo.
@@ -139,7 +117,7 @@ Responsible for authentication, single-active-session enforcement, session lifec
 - **FR-K7**: The system must expose current ranking information to authorized users.
 - **FR-K8**: The system must prevent duplicate or repeated ranking updates for the same finalized result.
 
-### 4.5 Spectator & Live View Context
+### 3.5 Spectator & Live View Context
 
 - **FR-S1**: The system must allow eligible users to observe ongoing matches as spectators.
 - **FR-S2**: Players and spectators must receive live updates about game state changes relevant to the game they are viewing.
@@ -148,7 +126,7 @@ Responsible for authentication, single-active-session enforcement, session lifec
 - **FR-S5**: Live views must reflect the authoritative state and reconcile after rejected or outdated actions.
 - **FR-S6**: Spectators must only see public information (player names, card counts, discard pile). Private hands must never be visible to spectators.
 
-### 4.6 Audit & Game History Context
+### 3.6 Audit & Game History Context
 
 - **FR-A1**: The system must preserve an immutable history of game-relevant state changes. Every state change must be appended to the game log **before** being broadcast to clients.
 - **FR-A2**: The system must trace all relevant player actions and system-generated rule resolutions to the corresponding game.
@@ -158,7 +136,7 @@ Responsible for authentication, single-active-session enforcement, session lifec
 - **FR-A6**: The system must define retention rules for historical game and tournament records.
 - **FR-A7**: The system must maintain audit logs for **sensitive operations** beyond gameplay (e.g., login attempts, session invalidations, role changes, tournament cancellations).
 
-### 4.7 Identity & Session Context
+### 3.7 Identity & Session Context
 
 - **FR-I1**: The system must authenticate users and manage session lifecycle.
 - **FR-I2**: The system must enforce **single-active-session per player**: a new login invalidates the previous session.
@@ -167,22 +145,22 @@ Responsible for authentication, single-active-session enforcement, session lifec
 
 ---
 
-## 5. Non-Functional Requirements
+## 4. Non-Functional Requirements
 
-### 5.1 Performance
+### 4.1 Performance
 
 - **NFR-P1**: The system must provide low-latency propagation of accepted game state changes.
 - **NFR-P2**: The system must support high volumes of concurrent active games and gameplay actions.
 - **NFR-P3**: The system must tolerate burst traffic during tournament round starts and completions.
 - **NFR-P4**: The system must support large numbers of concurrent players and spectators receiving live updates.
 
-### 5.2 Scalability
+### 4.2 Scalability
 
 - **NFR-SC1**: The system must scale horizontally as the number of players, games, tournaments, and spectators grows.
 - **NFR-SC2**: The platform should allow independent scaling of gameplay, tournament, ranking, live view, and audit capabilities.
 - **NFR-SC3**: The system must handle tournament scenarios with up to 1,000,000 participants without losing business correctness.
 
-### 5.3 Consistency and Correctness
+### 4.3 Consistency and Correctness
 
 - **NFR-C1**: The platform must maintain a single authoritative version of game state at any point in time.
 - **NFR-C2**: Actions affecting the same game must be processed in a valid business order.
@@ -190,14 +168,14 @@ Responsible for authentication, single-active-session enforcement, session lifec
 - **NFR-C4**: Tournament advancement must remain correct under mass simultaneous result processing.
 - **NFR-C5**: Ranking updates must remain consistent with finalized competitive outcomes.
 
-### 5.4 Reliability and Availability
+### 4.4 Reliability and Availability
 
 - **NFR-R1**: The platform must remain highly available for gameplay, tournament progression, and live state consumption.
 - **NFR-R2**: Failures in one business capability must not invalidate already accepted game results.
 - **NFR-R3**: The system must support reliable recovery of authoritative gameplay and tournament state after interruption.
 - **NFR-R4**: Historical game and audit records must be durably preserved.
 
-### 5.5 Security and Fairness
+### 4.5 Security and Fairness
 
 - **NFR-SE1**: The system must protect against invalid or manipulated gameplay outcomes.
 - **NFR-SE2**: Critical gameplay decisions and game state transitions must not depend on client-side authority.
@@ -207,7 +185,7 @@ Responsible for authentication, single-active-session enforcement, session lifec
 - **NFR-SE6**: The system must validate all inputs at system boundaries and apply signed event integrity where needed for sensitive operations.
 - **NFR-SE7**: The system must enforce single-active-session per player to prevent session takeover and concurrent manipulation.
 
-### 5.6 Maintainability and Evolvability
+### 4.6 Maintainability and Evolvability
 
 - **NFR-M1**: The solution must preserve clear bounded context separation between gameplay, tournaments, ranking, live views, and auditing.
 - **NFR-M2**: Game rules, tournament rules, and ranking policies should be evolvable without redefining unrelated domains.
@@ -216,7 +194,7 @@ Responsible for authentication, single-active-session enforcement, session lifec
 
 ---
 
-## 6. Domain Rules & Constraints
+## 5. Domain Rules & Constraints
 
 - **DR-1**: A room must contain between 2 and 10 players.
 - **DR-2**: A completed game must not accept further gameplay actions.
