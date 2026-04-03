@@ -49,8 +49,7 @@ The platform must be the **authoritative source of truth** for gameplay state, t
 - **FR-R3**: The system must allow eligible players to join a room that is open for participation and not full.
 - **FR-R4**: A room must have an explicit lifecycle with at least the states: waiting, in_progress, and completed.
 - **FR-R5**: The system must define and enforce the conditions under which a match may start.
-- **FR-R19**: A match within a room consists of a **best-of-three series** of individual games. The match winner is the player who wins 2 games first.
-- **FR-R20**: After each individual game completes, if no player has won 2 games yet, a new game is started within the same room with the same players.
+- **FR-R19**: A match within a room consists of a **best-of-three series** of individual games.
 
 **Gameplay:**
 
@@ -95,7 +94,7 @@ The platform must be the **authoritative source of truth** for gameplay state, t
 - **FR-T3**: The system must support tournaments with up to 1,000,000 players.
 - **FR-T4**: A tournament must have an explicit lifecycle with at least the states: planned, open_for_registration, in_progress, completed, and cancelled.
 - **FR-T5**: The system must manage brackets and determine player grouping into rooms of up to 10 players for each round.
-- **FR-T6**: Within each room, players play a **best-of-three match**. The **top 3 players** by match wins advance to the next round.
+- **FR-T6**: Within each room, players play a three-game match. The **top 3 players** by match wins advance to the next round.
 - **FR-T7**: The system must mark non-advancing players as eliminated.
 - **FR-T8**: The system must expose tournament progress, including round status, bracket position, and advancement state.
 - **FR-T9**: Tournament rounds proceed in elimination until **10 or fewer players** remain, at which point a single final room is created to determine the champion.
