@@ -353,9 +353,9 @@ flowchart TB
 - The sequence number on every command must match the room's current sequence number; otherwise rejected.
 - A room in `completed` or `cancelled` state rejects all gameplay commands (DR-2).
 - The Uno challenge is only valid within the 5-second `ChallengeWindow`.
-- A match consists of at most 3 games. The match ends when a player wins 2 games.
+- A match consists of at most 3 games.
 - A disconnected player's turns are skipped (passed), not played by a bot.
-- Forfeit behavior depends on room type: casual → removed, game continues; tournament → match loss.
+- Forfeit behavior depends on room type: casual → removed, game continues; tournament → match loss and elimination from tournament.
 
 **Domain Events:**
 
