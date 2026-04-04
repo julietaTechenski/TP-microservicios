@@ -1,8 +1,5 @@
 # UnoArena — Domain Design Document
 
-> Proyecto académico · Arquitectura de Microservicios · ITBA 2026
-> Derived from: `REQUIREMENTS.md`
-
 ---
 
 ## 1. Event Storming

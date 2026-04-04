@@ -1,7 +1,5 @@
 # UnoArena — Requirements Document
 
-> Proyecto académico · Arquitectura de Microservicios · ITBA 2026
-
 ---
 
 ## 1. Purpose
