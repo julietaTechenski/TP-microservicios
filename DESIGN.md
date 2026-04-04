@@ -161,7 +161,7 @@ Tournament      →  CancelTournament    →  TournamentCancelled          Tourn
 - 🔴 **Mass simultaneous completion**: Up to 100,000 rooms in a round complete near-simultaneously → Must handle burst ingestion without corrupting bracket state.
 - 🔴 **Crash mid-advancement**: System fails between recording a result and advancing players → Each step in the advancement process is idempotent (can be re-executed without duplicating effects). On recovery, the process resumes from the last confirmed step and re-executes pending ones.
 - 🔴 **Cancelled tournament + in-flight results**: A result arrives after cancellation → Discarded; no advancement or ranking updates triggered.
-- 🔴 **Top-3 tie-breaking edge cases**: All players in a room have the same match wins and card-point totals → Earliest final-game completion time breaks the tie. If still tied (simultaneous completion), arbitrary but deterministic ordering (e.g., by playerId) is applied.
+- 🔴 **Top-3 tie-breaking edge cases**: All players in a room have the same match wins and card-point totals → Earliest final-game completion time breaks the tie. If still tied (simultaneous completion), arbitrary but deterministic ordering by playerId is applied [A8].
 - 🔴 **Odd player counts**: When remaining players don't divide evenly into rooms of 10 → Rooms are filled as evenly as possible (e.g., 23 players → rooms of 8, 8, 7).
 
 ---
@@ -421,8 +421,7 @@ flowchart TB
 - `PlayerSlot` — Immutable reference to a player within a bracket position. Contains `PlayerId` and seeding rank.
 - `RoundNumber` — Non-negative sequential integer identifying a tournament round.
 - `TournamentConfiguration` — Immutable after creation. Encapsulates max-players-per-room (up to 10), seeding strategy, and tournament type.
-- `SeedingStrategy` — Strategy identifier (random, elo-based). Determines initial bracket placement.
-- `TieBreaker` — The fixed tie-breaking algorithm: (1) lower cumulative card-point total, (2) earliest final-game completion time, (3) deterministic playerId ordering as last resort.
+- `TieBreaker` — The fixed tie-breaking algorithm: (1) lower cumulative card-point total, (2) earliest final-game completion time, (3) deterministic playerId ordering as last resort. [A8]
 - `AdvancementResult` — Immutable. The top-3 players and eliminated players from a single room-match.
 
 **Invariants:**
@@ -522,23 +521,45 @@ This context is projection-oriented; it does not own authoritative game state.
 
 ### 3.5 Audit & Game History Context
 
-**Aggregate Root: `GameLog`** — Identified by `GameId` (unique per individual game within a match). Complete, immutable record. Only supports append operations.
+This context owns all immutable, append-only records. It contains two aggregate roots
+with distinct responsibilities but shared infrastructure and retention concerns.
+
+**Aggregate Root: `GameLog`** — Identified by `GameId`. Complete, immutable record of
+every state change within a single game. Supports replay and dispute resolution.
 
 **Value Objects:**
-
-- `GameLogEntry` — Immutable. Contains event type, server timestamp, playerId, sequenceNumber, and RNG seed reference.
-- `RetentionPolicy` — Defines retention duration based on match type (competitive vs. casual).
+- `GameLogEntry` — Immutable. Contains event type, server timestamp, playerId,
+  sequenceNumber, and RNG seed reference.
 
 **Invariants:**
-
 - Entries are append-only; no mutation or deletion within the retention period.
 - Every entry must have a strictly monotonic sequence number within its GameLog.
 
 **Repository (domain interface):**
-
 - `findGameLog(gameId)` → GameLog
 - `findGameLogsByMatch(roomId)` → List\<GameLog\>
 - `findGameLogEntriesByPlayer(gameId, playerId)` → List\<GameLogEntry\>
+
+---
+
+**Aggregate Root: `SystemAuditLog`** — Append-only record of sensitive operations
+outside gameplay: logins, role changes, tournament cancellations, session invalidations.
+
+**Value Objects:**
+- `SystemAuditEntry` — Immutable. Contains `entryId`, `eventType`, `actorId`,
+  `serverTimestamp`, `metadata`.
+
+**Invariants:**
+- Entries are append-only; no mutation or deletion within the retention period.
+- Every entry must have a non-null `actorId`.
+- `eventType` must belong to a known event type enum; unknown types are rejected
+  at the boundary.
+
+**Repository (domain interface):**
+- `appendEntry(SystemAuditEntry)` → void
+- `findEntriesByActor(actorId, timeRange)` → List\<SystemAuditEntry\>
+- `findEntriesByTarget(targetId, timeRange)` → List\<SystemAuditEntry\>
+- `findEntriesByType(eventType, timeRange)` → List\<SystemAuditEntry\>
 
 ### 3.6 Identity & Session Context
 
@@ -560,29 +581,6 @@ This context is projection-oriented; it does not own authoritative game state.
 - Role claims in a token must reflect the user's current roles at issuance time.
 - Session expiry during an active game triggers the 60-second grace timer flow in Room Play.
 
----
-### 3.8 Audit Information
-**Aggregate Root: `SystemAuditLog`**:Append-only record of sensitive operations outside gameplay such us as Login. Role changed, Tournament cancelled, etc. Only supports append operations. 
-
-**Entities:** None. The aggregate is purely append-only.
-
-**Value Objects:** 
-`SystemAuditEntry` — Immutable. Contains `entryId`, `eventType`, `actorId`, `serverTimestamp`, `metadata`.
-`RetentionPolicy` — defines retention duration based on entry sensitivity tier (security events retained longer than operational events).
-
-**Invariants**:
-
-Entries are append-only, no mutation or deletion within the retention period.
-Every entry must have a non-null `actorId`.
-`eventType` must belong to an events Enum; unknown types are rejected at the boundary.
-Entries from `Identity` (login, session, role changes) and `Tournament` (cancellations) are accepted.
-
-**Repository**:
-`appendEntry(SystemAuditEntry)` → void
-`findEntriesByActor(actorId, timeRange)` → List\<SystemAuditEntry\>
-`findEntriesByTarget(targetId, timeRange)` → List\<SystemAuditEntry\>
-`findEntriesByType(eventType, timeRange)` → List\<SystemAuditEntry\>
-
 ## 4. Domain Event Flow Narratives
 
 ### 4.1 Room Creation to Completion (end-to-end)
@@ -593,8 +591,8 @@ Entries from `Identity` (login, session, role changes) and `Tournament` (cancell
 4. **System** starts game 1 → Room initializes deck with RNG seed, deals cards, reveals initial card → emits `GameStarted`, `DeckShuffled`, `CardsDealt`, `InitialCardRevealed`, `TurnStarted` (async → Spectator builds initial projection, Audit logs all).
 5. **Players take turns** (synchronous decision point): each `PlayCard`/`DrawCard`/`CallUno`/`ChallengeUnoCall` command is validated synchronously against authoritative state with sequence number check → emits corresponding events (async → Spectator delivers patches, Audit appends). Special card effects emit `DirectionReversed`, `TurnSkipped`, or `DrawPenaltyApplied` as applicable.
 6. A player empties their hand → Room detects game winner, calculates card-point totals → emits `GameCompleted` (internal aggregate event) followed by `GameResultPublished` (integration event → Ranking processes Elo for casual rooms, Audit records).
-7. If no player has 2 game wins yet → System starts next game (return to step 4, game 2 or 3).
-8. A player reaches 2 game wins → Room calculates placement order → emits `MatchCompleted` (internal aggregate event) followed by `MatchResultPublished` (integration event → Tournament ingests result for advancement if tournament room, Audit records final result, Spectator shows end state).
+7. If fewer than 3 games have been played AND the placement ranking is not yet mathematically determined → Room Aggregate starts next game (return to step 4, game 2 or 3).
+8. If 3 games have been completed OR the ranking is mathematically locked → Room Aggregate calculates placement order by (1) game wins desc, (2) cumulative card-point total asc, (3) earliest final-game completion time → emits `MatchCompleted` (internal aggregate event) followed by `MatchResultPublished` (integration event → Tournament ingests result for top-3 advancement if tournament room, Ranking updates, Audit records final result, Spectator shows end state).
 9. Room transitions to `completed` and rejects all further commands.
 
 ### 4.2 Tournament Round Advancement (end-to-end)
@@ -790,6 +788,8 @@ Domain events within the Room Play context are split into two categories: **inte
 | A5 | **Deterministic RNG** means the same seed always produces the same shuffle/draw sequence.                                                                                                               | Required for audit replay. The specific PRNG algorithm is an implementation detail.                                                                              |
 | A6 | **Rate limit thresholds** (per IP, per user, per action) are configurable and will be tuned based on load testing.                                                                                      | Specific values are an operational concern, not a domain design decision.                                                                                        |
 | A7 | **Casual (ad-hoc) rooms** consist of a single game. The best-of-three match structure applies exclusively to tournament rooms. If the host of a casual room wants to play again, they create a new room | The assignment only references "best-of-three series" within the tournament progression rules section, and that Elo updates are defined per game, not per match. |
+| A8 | **Third-level tie-breaker: deterministic playerId ordering.** When two players remain tied after both assignment-defined tie-breakers (cumulative card-point total and earliest final-game completion time), advancement is resolved by ascending playerId. | The assignment does not define behavior for this edge case. A deterministic fallback is needed to avoid non-deterministic advancement. PlayerId ordering is arbitrary but reproducible and auditable. |
+| A9 | **Game logs and audit records are retained indefinitely by default, but retention duration may vary by room type.** Tournament logs (where dispute resolution and prize integrity matter) are expected to require longer retention than casual logs. The specific durations are not defined in this iteration. | The assignment requires immutable, auditable logs but does not specify retention limits. Acknowledging the distinction between casual and tournament retention prepares the model for future operational policies without embedding them in the domain logic now. |
 
 ### 8.2 Open Questions
 
@@ -803,3 +803,4 @@ Domain events within the Room Play context are split into two categories: **inte
 | Q6 | **Can spectators observe tournament bracket state, or only individual room games?** | Affects whether the Spectator context needs a `TournamentProjection` in addition to `RoomProjection`. |
 | Q7 | **What happens if the initial card revealed from the draw pile is a wild or action card?** Standard Uno rules vary on this. | Affects the `InitialCardRevealed` event handling in the Room aggregate. |
 | Q8 | **Connection-semantics assumption:** We assume clients connect via a long-lived channel for receiving state updates and a request-response channel for submitting commands. The specific protocols are out of scope for this iteration. | Protocol design is deferred per Section 3 of the assignment instructions. |
+| Q9 | **How are players distributed into rooms each tournament round?** The assignment states "rooms of up to 10" but does not specify whether placement is random, Elo-seeded, or follows another strategy. | Affects competitive fairness and bracket balancing. |
