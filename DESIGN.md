@@ -21,8 +21,7 @@
 The flows below read left to right: **Actor → Command → Event(s) → [Policy] → next Command**. Internal aggregate events and integration events are distinguished inline.
 
 ### 1.1 Room Play Flow (temporal, left to right)
-
-A room hosts a **match** (best-of-three series of individual **games**). The flow below describes one game within a match; the match-level lifecycle wraps around it.
+A room hosts a **match**: a three-game series in tournament rooms, or a single game in casual rooms [A7].
 
 ```
 Actor              Command              Event                        Aggregate   Policy / Hotspot
@@ -34,7 +33,7 @@ Tournament      →  StartMatch        →  MatchStarted                 Room   
   Context                                                                          and host triggers start
 Room            →  StartGame         →  GameStarted                  Room        Policy: first game of the best-of-three begins;
   Aggregate                                                                        or next game after previous game ends
-                                                                                   if no player has 2 wins yet
+                                                                                   if 3 games haven't been completed yet
                                         DeckShuffled                 Room
                                         CardsDealt                   Room
                                         InitialCardRevealed          Room
@@ -94,7 +93,7 @@ Room            →  DetectGameWinner  →  GameCompleted                Room   
 
 - If fewer than 3 games have been played → Room Aggregate triggers `StartGame` for the next game in the series. All three games are always played to produce the most complete data for placement ranking and tie-breaking.
 - After the 3rd game completes → Room Aggregate triggers `DetectMatchResults`.
-- 
+
 ```
 Room            →  DetectMatchResults → MatchCompleted               Room        Policy: placement order determined by
   Aggregate                                                                        (1) game wins desc,
@@ -344,23 +343,13 @@ The Spectator & Live View context is a **downstream conformist** that builds pro
 - Tournament integration events: `RoundStarted`, `FinalRoomCreated`, `FinalStandingsPublished`
 - Ranking events: `EloUpdated`, `RatingHistoryAppended` (for leaderboard and player profile updates)
 
-**Relationships:**
-
-- **Room Play → Tournament** (Customer-Supplier, Published Language): Room Play publishes `MatchResultPublished` integration events (carrying the `MatchResult` value object with placement order). Tournament consumes them to determine top-3 advancers. Tournament applies an Anti-Corruption Layer to validate and deduplicate incoming results.
-- **Room Play → Ranking** (Customer-Supplier, Published Language): Room Play publishes `GameResultPublished` integration events (carrying the `GameResult` value object, casual games only, with placement order). Ranking consumes them for Elo updates. Ranking applies its own eligibility rules (ACL): only casual games, not abandoned.
-- **Room Play → Spectator & Live View** (Conformist, Published Language): Room Play publishes state change events. Spectator context builds read-only projections following Room Play's event schema. Privacy enforcement: spectator projections never include private hands.
-- **Room Play → Audit & Game History** (Conformist, Published Language): Room Play publishes all state changes. Audit appends them immutably.
-- **Tournament → Room Play** (Customer-Supplier): When a new round starts, Tournament publishes `RoundStarted` events requesting room creation for all matches in the round. When ≤10 players remain, it requests creation of the final room.
-- **Ranking → Tournament** (Optional sync query): Tournament may query Ranking for current Elo ratings when seeding rules require elo-based placement.
-- **Identity & Session → Room Play, Spectator, Tournament, Ranking** (Open Host Service): Identity provides authentication and authorization via a published API. Enforces single-active-session. Each consuming context applies its own Anti-Corruption Layer for token validation and role interpretation. Session expiry events flow to Room Play to trigger disconnection handling.
-
 ### 2.4 Ubiquitous Language
 
 | Term | Definition                                                                                                                                                                                                                                                                                                                                            | Owning Context(s) |
 |---|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---|
 | **Game** | A single Uno game within a room: cards are dealt, turns are played, and one player wins by emptying their hand. Multiple games form a match.                                                                                                                                                                                                          | Room Play |
 | **Match** | A best-of-three series of games played within a room of up to 10 players.  After three games, players are ranked by: (1) games won (descending), (2) cumulative card-point total (ascending) among tied players, and (3) earliest final-game completion timestamp. In tournament rooms, the top 3 advance to the next round; the rest are eliminated. | Room Play, Tournament |
-| **Room** | A game instance with 2–10 players that hosts a match (best-of-three). Has a lifecycle: waiting → in_progress → completed/cancelled.                                                                                                                                                                                                                   | Room Play |
+| **Room** | A game instance with 2–10 players that hosts a match (three-game series in tournament, single game in casual [A7]). Has a lifecycle: waiting → in_progress → completed/cancelled. | Room Play |
 | **Round** | One elimination tier in a tournament. All rooms in a round play their matches concurrently. All must complete before the next round begins.                                                                                                                                                                                                           | Tournament |
 | **Tournament** | A multi-round elimination competition. Rounds continue until ≤10 players remain, then a final room determines the champion. Lifecycle: planned → open_for_registration → in_progress → completed/cancelled.                                                                                                                                           | Tournament |
 | **Placement Order** | The ranking of all players in a room at match end (1st through last), based on game wins. Used by Ranking for Elo calculation and by Tournament for top-3 advancement.                                                                                                                                                                                | Room Play, Tournament, Ranking |
@@ -410,7 +399,8 @@ The Spectator & Live View context is a **downstream conformist** that builds pro
 - `MatchResult` — Immutable snapshot at match completion: match winner, game-win counts per player, placement order (1st through last), cumulative card-point totals. Serves as the payload of the `MatchResultPublished` integration event.
 - `PlacementOrder` — Ordered list of players ranked by game wins within the match. Used for Elo and tournament advancement.
 - `SequenceNumber` — Monotonically increasing integer. Self-validating: must be non-negative and strictly greater than the previous value.
-- `RngSeed` — Immutable seed for the deterministic RNG. The initial seed is set at game start for the first shuffle and deal. Additional seeds are generated and stored when a draw pile reshuffle occurs mid-game. All seeds are persisted per game for replay and audit.- `ChallengeWindow` — Immutable time interval: opens on second-to-last card play, closes at min(5 seconds later, next turn start). Server-authoritative.
+- `RngSeed` — Immutable seed for the deterministic RNG. The initial seed is set at game start for the first shuffle and deal. Additional seeds are generated and stored when a draw pile reshuffle occurs mid-game. All seeds are persisted per game for replay and audit.
+- `ChallengeWindow` — Immutable time interval: opens on second-to-last card play, closes at min(5 seconds later, next turn start). Server-authoritative.
 - `ChosenColor` — Enum: red, yellow, green, blue. The color declared by the player after playing a wild card. Determines the matching constraint for the next play.
 - `GraceTimer` — Duration value (60 seconds). During the window, disconnected player's turns are skipped.
 - `RoomConfiguration` — Immutable after creation. Encapsulates player count (2–10), room type (casual/tournament), turn timeout duration.
@@ -657,8 +647,8 @@ outside gameplay: logins, role changes, tournament cancellations, session invali
 4. **System** starts game 1 → Room initializes deck with RNG seed, deals cards, reveals initial card → emits `GameStarted`, `DeckShuffled`, `CardsDealt`, `InitialCardRevealed`, `TurnStarted` (async → Spectator builds initial projection, Audit logs all).
 5. **Players take turns** (synchronous decision point): each `PlayCard`/`DrawCard`/`CallUno`/`ChallengeUnoCall`/`ChooseWildColor` command is validated synchronously against authoritative state with sequence number check → emits corresponding events (async → Spectator delivers patches, Audit appends). Special card effects emit `DirectionReversed`, `TurnSkipped`, `DrawPenaltyApplied`, or `WildColorChosen` as applicable. If the draw pile is exhausted during a draw, `DrawPileReshuffled` is emitted before the card is drawn.
 6. A player empties their hand → Room detects game winner, calculates card-point totals → emits `GameCompleted` (internal aggregate event) followed by `GameResultPublished` (integration event → Ranking processes Elo for casual rooms, Audit records).
-7. If fewer than 3 games have been played AND the placement ranking is not yet mathematically determined → Room Aggregate starts next game (return to step 4, game 2 or 3).
-8. If 3 games have been completed OR the ranking is mathematically locked → Room Aggregate calculates placement order by (1) game wins desc, (2) cumulative card-point total asc, (3) earliest final-game completion time → emits `MatchCompleted` (internal aggregate event) followed by `MatchResultPublished` (integration event → Tournament ingests result for top-3 advancement if tournament room, Ranking updates, Audit records final result, Spectator shows end state).
+7. If fewer than 3 games have been played → Room Aggregate starts next game (return to step 4, game 2 or 3).
+8. If 3 games have been completed → Room Aggregate calculates placement order by (1) game wins desc, (2) cumulative card-point total asc, (3) earliest final-game completion time → emits `MatchCompleted` (internal aggregate event) followed by `MatchResultPublished` (integration event → Tournament ingests result for top-3 advancement if tournament room, Ranking updates, Audit records final result, Spectator shows end state).
 9. Room transitions to `completed` and rejects all further commands.
 
 ### 4.2 Tournament Round Advancement (end-to-end)
@@ -794,7 +784,8 @@ Tournament round advancement is a multi-step process: result ingestion → top-3
 ### 6.4 Recovery from Context-Level Failures
 
 - **Room Play failure:** The room's last committed state (event log) is the recovery point. On restart, the room aggregate is reconstructed from the event log. In-flight commands that were not acknowledged are retried by clients (who will detect stale sequence numbers if the command was already processed).
-- **Tournament failure:** Idempotent replay from the event bus. Unprocessed `MatchResultPublished` events are redelivered and each advancement step resumes from the last checkpoint.- **Ranking failure:** `GameResultPublished` events accumulate in the bus; on recovery, Ranking processes the backlog. Idempotency keys prevent double updates.
+- **Tournament failure:** Idempotent replay from the event bus. Unprocessed `MatchResultPublished` events are redelivered and each advancement step resumes from the last checkpoint.
+- **Ranking failure:** `GameResultPublished` events accumulate in the bus; on recovery, Ranking processes the backlog. Idempotency keys prevent double updates.
 - **Spectator failure:** Projections are rebuilt from Room Play events. Clients reconnect and request a snapshot, then resume receiving patches.
 - **Audit failure:** Events accumulate; on recovery, the backlog is appended. Sequence numbers ensure correct ordering.
 
@@ -863,7 +854,6 @@ When a casual room drops below 2 active players due to forfeits or disconnection
 | A8 | **Third-level tie-breaker: deterministic playerId ordering.** When two players remain tied after both assignment-defined tie-breakers (cumulative card-point total and earliest final-game completion time), advancement is resolved by ascending playerId. | The assignment does not define behavior for this edge case. A deterministic fallback is needed to avoid non-deterministic advancement. PlayerId ordering is arbitrary but reproducible and auditable. |
 | A9 | **Game logs and audit records are retained indefinitely by default, but retention duration may vary by room type.** Tournament logs (where dispute resolution and prize integrity matter) are expected to require longer retention than casual logs. The specific durations are not defined in this iteration. | The assignment requires immutable, auditable logs but does not specify retention limits. Acknowledging the distinction between casual and tournament retention prepares the model for future operational policies without embedding them in the domain logic now. |
 
-### 8.2 Open Questions
 
 ### 8.2 Open Questions
 
