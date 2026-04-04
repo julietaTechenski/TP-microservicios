@@ -35,11 +35,3 @@ Player / Operator
 | **Spectator & Live View** | Supporting | Real-time public projections; hand privacy enforced at construction |
 | **Audit & Game History** | Supporting | Immutable event log, traceability for dispute resolution |
 | **Identity & Session** | Generic | Authentication, single active session per player, role control |
-
-## Key Design Decisions
-
-1. **Synchronous validation, asynchronous propagation** — Commands are validated against authoritative state before being accepted. Downstream contexts receive events asynchronously.
-2. **Sequence numbers for concurrency control** — Stale actions are rejected with HTTP 409; clients reconcile via the live state stream.
-3. **Privacy enforced at construction** — The spectator projection never contains private hands; there is no filtering at delivery time.
-4. **Idempotent tournament advancement** — Each step of round advancement is idempotent and safely resumable from the last checkpoint.
-5. **Log-before-broadcast** — Every state change is appended to the immutable game log before being propagated to clients or downstream contexts.
