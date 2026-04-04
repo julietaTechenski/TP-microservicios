@@ -659,7 +659,7 @@ Room Play emits `MatchResultPublished`. If the event bus loses the event or Tour
 
 **Scenario B — Tournament crashes mid-advancement (after recording result, before advancing players):**
 
-The saga pattern ensures each step is idempotent. On restart, Tournament re-reads unprocessed events and replays the saga. Since result recording is idempotent, the duplicate is discarded, and advancement proceeds.
+Each step in the advancement process is idempotent. On restart, Tournament re-reads unprocessed events and replays them from the last confirmed step. Since result recording is idempotent, any duplicate is discarded and advancement proceeds normally.
 
 **Scenario C — Ranking fails to process a game result:**
 
@@ -706,12 +706,12 @@ All cross-context event consumers enforce idempotency using composite keys:
 
 At the command level, sequence numbers make Room Play naturally idempotent: the same command against the same state version produces the same result; against a newer version, it is rejected.
 
-### 6.2 Saga Pattern for Tournament Advancement
-
+### 6.2 Idempotent Multi-Step Tournament Advancement
 Tournament round advancement is a multi-step process: result ingestion → top-3 determination → player advancement → (if applicable) next round room creation. Each step:
-- Is **idempotent**: repeating it with the same input produces no additional side effects.
-- Is **individually persistent**: progress is checkpointed after each step.
-- Has **compensation where needed**: if room creation fails for a next-round room, the system retries creation without re-doing advancement.
+
+* Is idempotent: repeating it with the same input produces no additional side effects.
+* Is individually persistent: progress is checkpointed after each step.
+* Has retry with safe resumption: if any step fails (e.g., room creation for the next round), the system retries from the failed step without re-executing previously completed ones.
 
 ### 6.3 Invariant Violation Prevention
 
@@ -720,7 +720,7 @@ Tournament round advancement is a multi-step process: result ingestion → top-3
 | Single authoritative game state (NFR-C1) | One writer per room; all mutations go through the Room aggregate root |
 | Ordered action processing (NFR-C2) | Sequence numbers; stale actions rejected |
 | No corrupt state from concurrency (NFR-C3) | Optimistic concurrency control; single-writer guarantee |
-| Tournament correctness under burst (NFR-C4) | Idempotent saga steps; write-side advancement only |
+| Tournament correctness under burst (NFR-C4) | Idempotent multi-step advancement; each step checkpointed and safely resumable |
 | Ranking consistency (NFR-C5) | Idempotency keys; eligibility checks before update |
 | No spectator data leakage (DR-5) | Privacy enforced at projection construction, not delivery |
 | Single active session (DR-15) | New login invalidates old session at Identity aggregate level |
@@ -728,14 +728,13 @@ Tournament round advancement is a multi-step process: result ingestion → top-3
 ### 6.4 Recovery from Context-Level Failures
 
 - **Room Play failure:** The room's last committed state (event log) is the recovery point. On restart, the room aggregate is reconstructed from the event log. In-flight commands that were not acknowledged are retried by clients (who will detect stale sequence numbers if the command was already processed).
-- **Tournament failure:** Idempotent saga replay from the event bus. Unprocessed `MatchResultPublished` events are redelivered and processed.
-- **Ranking failure:** `GameResultPublished` events accumulate in the bus; on recovery, Ranking processes the backlog. Idempotency keys prevent double updates.
+- **Tournament failure:** Idempotent replay from the event bus. Unprocessed `MatchResultPublished` events are redelivered and each advancement step resumes from the last checkpoint.- **Ranking failure:** `GameResultPublished` events accumulate in the bus; on recovery, Ranking processes the backlog. Idempotency keys prevent double updates.
 - **Spectator failure:** Projections are rebuilt from Room Play events. Clients reconnect and request a snapshot, then resume receiving patches.
 - **Audit failure:** Events accumulate; on recovery, the backlog is appended. Sequence numbers ensure correct ordering.
 
 ---
 
-## 7. Architecture Decisions (Flow, not Technology)
+## 7. Architecture Decisions
 
 ### 7.1 Separation of command processing and state distribution
 
@@ -745,10 +744,8 @@ Player actions are submitted synchronously and validated against the authoritati
 
 Every client command carries a sequence number representing the client's known state version. If the number is stale, the command is rejected and the client must reconcile by consuming the live state stream. This avoids locking while guaranteeing that concurrent or stale actions never corrupt authoritative state.
 
-### 7.3 Saga-based tournament orchestration
-
-Tournament advancement follows a saga pattern: result ingestion → top-3 determination → next-round room creation. Each step is idempotent and replayable. This is necessary because tournament rounds involve thousands of independently completing matches, and synchronous orchestration would create brittle coupling and temporal dependencies.
-
+### 7.3 Multi-step tournament advancement
+Tournament advancement follows a sequential multi-step process: result ingestion → top-3 determination → next-round room creation. Each step is idempotent, checkpointed, and safely resumable from the point of failure. This is necessary because tournament rounds involve thousands of independently completing matches, and synchronous orchestration would create brittle coupling and temporal dependencies.
 ### 7.4 Eventual consistency between Game and Tournament contexts
 
 When a match completes, the Room Play context publishes the result as a `MatchResultPublished` integration event. The Tournament context consumes it asynchronously. Bracket state is eventually consistent with match outcomes — acceptable because bracket advancement is not time-critical. The authoritative advancement decision is always made against the write-side state, never the read-optimized projection.
