@@ -17,12 +17,12 @@ This repository contains the **domain design checkpoint** for the Microservices 
 Player / Operator
     → CreateRoom / CreateTournament
     → JoinRoom / RegisterForTournament
-    → StartMatch → [best-of-three games] → MatchResultPublished
-                                                ↓
-                                    Tournament: top-3 advancement
-                                    Ranking: Elo update (casual only)
-                                    Audit: immutable game log
-                                    Spectator: live projections
+    → StartMatch → [three-game series (tournament) | single game (casual)] → MatchResultPublished
+                                                                                    ↓
+                                                                        Tournament: top-3 advancement
+                                                                        Ranking: Elo update (casual only)
+                                                                        Audit: immutable game log
+                                                                        Spectator: live projections
 ```
 
 ## Bounded Contexts
