@@ -611,6 +611,13 @@ outside gameplay: logins, role changes, tournament cancellations, session invali
 - `eventType` must belong to a known event type enum; unknown types are rejected
   at the boundary.
 
+**Domain Events:**
+
+| Event | Payload (conceptual) | Consumers |
+|---|---|---|
+| `GameLogEntryAppended` | gameId, sequenceNumber, eventType, timestamp, rngSeedRef | (internal — Audit context only) |
+| `SystemAuditEntryAppended` | entryId, eventType, actorId, targetId, serverTimestamp | (internal — Audit context only) |
+
 **Repository (domain interface):**
 - `appendEntry(SystemAuditEntry)` → void
 - `findEntriesByActor(actorId, timeRange)` → List\<SystemAuditEntry\>
