@@ -6,6 +6,20 @@
 ---
 
 ## 1. Event Storming
+
+**EventStorming notation used in this document:**
+
+| Element | Role | Representation in flows below |
+|---|---|---|
+| 🟧 Domain Event | Something that happened in the domain (past tense) | `Event` column — e.g., `CardPlayed`, `GameCompleted` |
+| 🟦 Command | An intention to change state | `Command` column — e.g., `PlayCard`, `StartMatch` |
+| 🟨 Aggregate | The consistency boundary that processes the command | `Aggregate` column — e.g., `Room`, `Tournament` |
+| 🟪 Policy | A reactive rule triggered by an event ("when X happens, then Y") | `Policy / Hotspot` column |
+| 🟥 Hotspot | A conflict, edge case, or point requiring special attention | 🔴 markers after each flow |
+| 👤 Actor | The agent initiating a command (player, system, operator) | `Actor` column |
+
+The flows below read left to right: **Actor → Command → Event(s) → [Policy] → next Command**. Internal aggregate events and integration events are distinguished inline.
+
 ### 1.1 Room Play Flow (temporal, left to right)
 
 A room hosts a **match** (best-of-three series of individual **games**). The flow below describes one game within a match; the match-level lifecycle wraps around it.
@@ -32,9 +46,20 @@ Player          →  PlayCard          →  CardPlayed                   Room   
                                         TurnSkipped                  Room        Policy: skip card advances past next player
                                         DrawPenaltyApplied           Room        Policy: draw-two / wild-draw-four forces
                                                                                    next player to draw
-
+Player          →  ChooseWildColor   →  WildColorChosen              Room        Policy: after playing a wild or
+                                                                                   wild-draw-four, the active player must
+                                                                                   declare a color before the turn advances.
+                                                                                   If the turn timeout expires without a
+                                                                                   choice, a color is assigned
+                                                                                   deterministically from the game's RNG
+                                                                                   seed.
 Player          →  DrawCard          →  CardDrawn                    Room
                                         TurnAdvanced                 Room
+Room            →  ReshuffleDrawPile →  DrawPileReshuffled           Room        Policy: when a draw action finds the draw
+  Aggregate                                                                        pile empty, the discard pile (minus the
+                                                                                   current top card) is reshuffled using a
+                                                                                   new deterministic RNG seed and becomes
+                                                                                   the new draw pile.
 
 Player          →  CallUno           →  UnoCallMade                  Room        Policy: must be called when player plays
                                                                                    second-to-last card, before next turn
@@ -67,9 +92,9 @@ Room            →  DetectGameWinner  →  GameCompleted                Room   
 
 **After GameCompleted:**
 
-- If fewer than 3 games have been played AND the placement ranking is not yet mathematically determined → Room Aggregate triggers `StartGame` for the next game in the series.
-- If 3 games have been completed OR the ranking is mathematically locked → Room Aggregate triggers `DetectMatchResults`.
-
+- If fewer than 3 games have been played → Room Aggregate triggers `StartGame` for the next game in the series. All three games are always played to produce the most complete data for placement ranking and tie-breaking.
+- After the 3rd game completes → Room Aggregate triggers `DetectMatchResults`.
+- 
 ```
 Room            →  DetectMatchResults → MatchCompleted               Room        Policy: placement order determined by
   Aggregate                                                                        (1) game wins desc,
@@ -91,7 +116,7 @@ Room            →  DetectMatchResults → MatchCompleted               Room   
 - `GameCompleted` and `MatchCompleted` are **internal aggregate events** that record the end-of-game and end-of-match state transitions within the Room aggregate. They trigger internal logic (e.g., starting the next game, calculating placement order).
 - `GameResultPublished` and `MatchResultPublished` are **integration events** emitted after the internal events. They carry the corresponding value objects (`GameResult` and `MatchResult`) as their payloads and are the events consumed by downstream bounded contexts.
 
-**Hotspots (puntos de conflicto):**
+**Hotspots:**
 
 - 🔴 **Concurrent play**: Two players submit actions simultaneously → Resolved via sequence numbers and optimistic rejection. The authoritative game state has a single writer; the second action arrives with a stale sequence number and is rejected.
 - 🔴 **Challenge window boundary**: The 5-second Uno challenge window closes either after 5 seconds OR when the next player begins their turn, whichever comes first. Server-authoritative timestamps determine validity.
@@ -128,7 +153,7 @@ Tournament      →  GenerateBrackets    →  BracketsGenerated            Tourn
 
 ```
 Tournament      →  IngestMatchResult   →  MatchResultRecorded          Tournament   Policy: idempotent on
-  Context                                                                             {matchId, gameNumber, sequenceNumber}
+  Context                                                                             {roomMatchId, matchResultVersion}
 Tournament      →  DetermineAdvancers  →  Top3Advanced                 Tournament   Policy: top 3 players by match wins advance;
   Aggregate                                                                           tie-breaker 1: lower cumulative
                                                                                       card-point total;
@@ -214,7 +239,6 @@ Ranking         →  ProcessCasualGameResult  →  EloUpdated               Play
 | **Identity & Session** | Authentication, single-active-session enforcement, session lifecycle, token management, role-based authorization, rate limiting | User accounts, credentials, sessions |
 
 ### 2.3 Context Map
-
 ```mermaid
 flowchart TB
     subgraph Core["CORE DOMAIN"]
@@ -239,10 +263,10 @@ flowchart TB
     end
 
 %% Room Play → downstream (async domain events)
-    RoomPlay -->|"CS · async events<br/>MatchResultPublished<br/>(U→D)"| Tournament
-    RoomPlay -->|"CS · async events<br/>GameResultPublished<br/>(U→D)"| Ranking
-    RoomPlay -->|"CF · async events<br/>state changes<br/>(U→D)"| Spectator
-    RoomPlay -->|"CF · async events<br/>state changes<br/>(U→D)"| Audit
+    RoomPlay -->|"CS/PL · async events<br/>MatchResultPublished<br/>(U→D) · ACL at consumer"| Tournament
+    RoomPlay -->|"CS/PL · async events<br/>GameResultPublished<br/>(U→D) · ACL at consumer"| Ranking
+    RoomPlay -->|"CF/PL · async events<br/>state changes (public only)<br/>(U→D)"| Spectator
+    RoomPlay -->|"CF/PL · async events<br/>all state changes<br/>(U→D)"| Audit
 
 %% Tournament → Room Play (room creation for rounds)
     Tournament -->|"CS · async events<br/>RoundStarted<br/>(U→D)"| RoomPlay
@@ -251,28 +275,30 @@ flowchart TB
     Tournament -->|"CF · async events<br/>TournamentCancelled<br/>(U→D)"| Audit
 
 %% Identity → consumers (auth, consulted via OHS)
-    Identity -->|"OHS · sync query<br/>token validation<br/>+ session.expired<br/>(U→D)"| RoomPlay
-    Identity -->|"OHS · sync query<br/>token & authz<br/>(U→D)"| Spectator
-    Identity -->|"OHS · sync query<br/>token & role<br/>(U→D)"| Tournament
-    Identity -->|"OHS · sync query<br/>token validation<br/>(U→D)"| Ranking
+    Identity -->|"OHS/PL · sync query<br/>token validation<br/>+ session.expired<br/>(U→D) · ACL at consumer"| RoomPlay
+    Identity -->|"OHS/PL · sync query<br/>token & authz<br/>(U→D) · ACL at consumer"| Spectator
+    Identity -->|"OHS/PL · sync query<br/>token & role<br/>(U→D) · ACL at consumer"| Tournament
+    Identity -->|"OHS/PL · sync query<br/>token validation<br/>(U→D) · ACL at consumer"| Ranking
 
 %% Identity → Audit (security audit)
     Identity -->|"CF · async events<br/>LoginAttempted<br/>SessionInvalidated<br/>RoleChanged<br/>(U→D)"| Audit
 
 %% Ranking → Tournament (optional seeding query)
-    Ranking -.->|"Sync query<br/>elo-based seeding<br/>(U→D) [Optional]"| Tournament
+    Ranking -.->|"OHS · sync query<br/>elo-based seeding<br/>(U→D) [Optional]"| Tournament
 
     subgraph Legend["LEGEND"]
         L1["U = Upstream · D = Downstream"]
         L2["CS = Customer-Supplier · CF = Conformist"]
-        L3["OHS = Open Host Service · ACL = Anti-Corruption Layer"]
-        L4["─→ = Domain event or sync query"]
-        L5["···→ = Optional / on-demand"]
+        L3["OHS = Open Host Service · PL = Published Language"]
+        L4["ACL = Anti-Corruption Layer (at consuming side)"]
+        L5["─→ = Domain event or sync query"]
+        L6["···→ = Optional / on-demand"]
         style L1 fill:#f0f0f0,stroke:#333,color:#000
         style L2 fill:#f0f0f0,stroke:#333,color:#000
         style L3 fill:#f0f0f0,stroke:#333,color:#000
         style L4 fill:#f0f0f0,stroke:#333,color:#000
         style L5 fill:#f0f0f0,stroke:#333,color:#000
+        style L6 fill:#f0f0f0,stroke:#333,color:#000
     end
 
     style Core fill:#ffe6e6,stroke:#cc0000,color:#000,stroke-width:2px
@@ -280,6 +306,43 @@ flowchart TB
     style Generic fill:#9daef2,stroke:#5068cc,color:#000,stroke-width:2px
     style Legend fill:#fafafa,stroke:#999,color:#000,stroke-width:2px
 ```
+
+**Relationships:**
+
+- **Room Play → Tournament** (Customer-Supplier, Published Language, ACL at consumer): Room Play publishes `MatchResultPublished` integration events carrying the `MatchResult` value object with placement order. Tournament consumes them to determine top-3 advancers. Tournament applies an Anti-Corruption Layer to validate, deduplicate (idempotency key `{roomMatchId, matchResultVersion}`), and translate incoming results into its internal model.
+- **Room Play → Ranking** (Customer-Supplier, Published Language, ACL at consumer): Room Play publishes `GameResultPublished` integration events carrying the `GameResult` value object (casual games only, with placement order). Ranking applies an Anti-Corruption Layer that enforces eligibility rules: only completed casual games qualify; abandoned games are discarded. Idempotency key `{gameId, sequenceNumber}` prevents duplicate Elo updates.
+- **Room Play → Spectator & Live View** (Conformist, Published Language): Room Play publishes state change events. Spectator context builds read-only projections following Room Play's event schema. Privacy enforcement: spectator projections never include private hands or RNG seeds — enforced at projection construction time.
+- **Room Play → Audit & Game History** (Conformist, Published Language): Room Play publishes all state changes (including private data and RNG seeds). Audit appends them immutably. Audit receives a superset of what Spectator receives.
+- **Tournament → Room Play** (Customer-Supplier): When a new round starts, Tournament publishes `RoundStarted` events requesting room creation for all matches in the round. When ≤10 players remain, it publishes `FinalRoomCreated` requesting creation of the final room.
+- **Ranking → Tournament** (Open Host Service, optional sync query): Tournament may query Ranking for current Elo ratings when seeding rules require Elo-based bracket placement. This relationship is optional and only activated when seeded tournaments are configured.
+- **Identity & Session → Room Play, Spectator, Tournament, Ranking** (Open Host Service, Published Language, ACL at each consumer): Identity provides authentication and authorization via a published API. Enforces single-active-session. Each consuming context applies its own Anti-Corruption Layer to validate tokens and interpret role claims in its own ubiquitous language. Session expiry events (`session.expired`) flow to Room Play to trigger the disconnection grace timer flow.
+
+### 2.3.1 Spectator Boundary — Explicit Treatment
+
+The Spectator & Live View context is a **downstream conformist** that builds projections from Room Play and Tournament events. Its boundary is defined by strict information filtering:
+
+**What crosses the boundary (public state):**
+- Player names and connection statuses
+- Card counts per player (number of cards in hand, not the cards themselves)
+- Discard pile top card and current active color
+- Current turn owner and turn direction
+- Draw pile size
+- Uno-call statuses per player
+- Game-win counts within the current match
+- Match and game completion results (placement order, winner)
+- Tournament bracket state, round progression, and final standings
+
+**What is withheld (never crosses the boundary):**
+- Individual player hands (card identities)
+- RNG seeds
+- Internal aggregate state (sequence numbers used for concurrency control)
+- Raw command payloads from other players
+
+**Domain events that drive Spectator updates:**
+- All Room Play internal events (filtered to public projections): `GameStarted`, `CardPlayed`, `WildColorChosen`, `CardDrawn`, `DrawPileReshuffled`, `TurnAdvanced`, `DirectionReversed`, `TurnSkipped`, `DrawPenaltyApplied`, `UnoCallMade`, `UnoCallChallenged`, `ChallengePenaltyApplied`, `TurnTimedOut`, `PlayerDisconnected`, `PlayerReconnected`, `PlayerForfeited`
+- Room Play integration events: `GameResultPublished`, `MatchResultPublished`
+- Tournament integration events: `RoundStarted`, `FinalRoomCreated`, `FinalStandingsPublished`
+- Ranking events: `EloUpdated`, `RatingHistoryAppended` (for leaderboard and player profile updates)
 
 **Relationships:**
 
@@ -347,8 +410,8 @@ flowchart TB
 - `MatchResult` — Immutable snapshot at match completion: match winner, game-win counts per player, placement order (1st through last), cumulative card-point totals. Serves as the payload of the `MatchResultPublished` integration event.
 - `PlacementOrder` — Ordered list of players ranked by game wins within the match. Used for Elo and tournament advancement.
 - `SequenceNumber` — Monotonically increasing integer. Self-validating: must be non-negative and strictly greater than the previous value.
-- `RngSeed` — Immutable seed for the deterministic RNG of a game. Stored per game for replay and audit.
-- `ChallengeWindow` — Immutable time interval: opens on second-to-last card play, closes at min(5 seconds later, next turn start). Server-authoritative.
+- `RngSeed` — Immutable seed for the deterministic RNG. The initial seed is set at game start for the first shuffle and deal. Additional seeds are generated and stored when a draw pile reshuffle occurs mid-game. All seeds are persisted per game for replay and audit.- `ChallengeWindow` — Immutable time interval: opens on second-to-last card play, closes at min(5 seconds later, next turn start). Server-authoritative.
+- `ChosenColor` — Enum: red, yellow, green, blue. The color declared by the player after playing a wild card. Determines the matching constraint for the next play.
 - `GraceTimer` — Duration value (60 seconds). During the window, disconnected player's turns are skipped.
 - `RoomConfiguration` — Immutable after creation. Encapsulates player count (2–10), room type (casual/tournament), turn timeout duration.
 
@@ -359,9 +422,10 @@ flowchart TB
 - The sequence number on every command must match the room's current sequence number; otherwise rejected.
 - A room in `completed` or `cancelled` state rejects all gameplay commands (DR-2).
 - The Uno challenge is only valid within the 5-second `ChallengeWindow`.
-- A match consists of at most 3 games.
+- A match in a tournament room always consists of exactly 3 games. A match in a casual room consists of a single game [A7].
 - A disconnected player's turns are skipped (passed), not played by a bot.
 - Forfeit behavior depends on room type: casual → removed, game continues; tournament → match loss and elimination from tournament.
+- A wild or wild-draw-four play must be followed by a `ChooseWildColor` command from the same player before the turn advances. If the turn timeout expires without a choice, the system assigns a color deterministically using the game's RNG seed.
 
 **Domain Events:**
 
@@ -378,10 +442,12 @@ flowchart TB
 | `InitialCardRevealed` | roomId, gameNumber, card | First discard pile card set |
 | `TurnStarted` | roomId, playerId, turnNumber, timeoutDeadline | Active turn begins |
 | `CardPlayed` | roomId, playerId, card, resultingState, sequenceNumber | Card placed on discard pile |
+| `WildColorChosen` | roomId, playerId, chosenColor, sequenceNumber | Active color set after wild card play |
 | `DirectionReversed` | roomId, newDirection, sequenceNumber | Reverse card effect applied |
 | `TurnSkipped` | roomId, skippedPlayerId, sequenceNumber | Skip card effect applied |
 | `DrawPenaltyApplied` | roomId, targetPlayerId, cardCount, sequenceNumber | Draw-two or wild-draw-four effect applied |
 | `CardDrawn` | roomId, playerId, sequenceNumber | Player drew from draw pile |
+| `DrawPileReshuffled` | roomId, gameNumber, newRngSeed, sequenceNumber | Draw pile exhausted; discard pile reshuffled into new draw pile |
 | `TurnAdvanced` | roomId, nextPlayerId, turnNumber | Turn passed to next player |
 | `UnoCallMade` | roomId, playerId, sequenceNumber | Player declared Uno |
 | `UnoCallChallenged` | roomId, challengerId, targetPlayerId, sequenceNumber | Challenge initiated |
@@ -443,7 +509,7 @@ flowchart TB
 | `PlayerRegistered` | tournamentId, playerId | Player enrolled |
 | `RegistrationClosed` | tournamentId | Registration window ends |
 | `BracketsGenerated` | tournamentId, roundNumber, roomAssignments | Bracket structure determined |
-| `MatchResultRecorded` | tournamentId, roomMatchId, matchResult, idempotencyKey | Ingested match result persisted (idempotent on {matchId, gameNumber, sequenceNumber}) |
+| `MatchResultRecorded` | tournamentId, roomMatchId, matchResult, idempotencyKey | Ingested match result persisted (idempotent on {roomMatchId, matchResultVersion}) |
 | `Top3Advanced` | tournamentId, roomMatchId, advancingPlayerIds | Top-3 advancers determined |
 | `PlayersEliminated` | tournamentId, roomMatchId, eliminatedPlayerIds | Non-top-3 players eliminated |
 | `RoundCompleted` | tournamentId, roundNumber | All rooms in round reported results |
@@ -589,7 +655,7 @@ outside gameplay: logins, role changes, tournament cancellations, session invali
 2. **Players** send `JoinRoom` → Room validates capacity (2–10) → emits `PlayerJoined` per player (async → Spectator updates participant list).
 3. **Host** sends `StartMatch` → Room validates min players reached → emits `MatchStarted` (async → Spectator, Audit).
 4. **System** starts game 1 → Room initializes deck with RNG seed, deals cards, reveals initial card → emits `GameStarted`, `DeckShuffled`, `CardsDealt`, `InitialCardRevealed`, `TurnStarted` (async → Spectator builds initial projection, Audit logs all).
-5. **Players take turns** (synchronous decision point): each `PlayCard`/`DrawCard`/`CallUno`/`ChallengeUnoCall` command is validated synchronously against authoritative state with sequence number check → emits corresponding events (async → Spectator delivers patches, Audit appends). Special card effects emit `DirectionReversed`, `TurnSkipped`, or `DrawPenaltyApplied` as applicable.
+5. **Players take turns** (synchronous decision point): each `PlayCard`/`DrawCard`/`CallUno`/`ChallengeUnoCall`/`ChooseWildColor` command is validated synchronously against authoritative state with sequence number check → emits corresponding events (async → Spectator delivers patches, Audit appends). Special card effects emit `DirectionReversed`, `TurnSkipped`, `DrawPenaltyApplied`, or `WildColorChosen` as applicable. If the draw pile is exhausted during a draw, `DrawPileReshuffled` is emitted before the card is drawn.
 6. A player empties their hand → Room detects game winner, calculates card-point totals → emits `GameCompleted` (internal aggregate event) followed by `GameResultPublished` (integration event → Ranking processes Elo for casual rooms, Audit records).
 7. If fewer than 3 games have been played AND the placement ranking is not yet mathematically determined → Room Aggregate starts next game (return to step 4, game 2 or 3).
 8. If 3 games have been completed OR the ranking is mathematically locked → Room Aggregate calculates placement order by (1) game wins desc, (2) cumulative card-point total asc, (3) earliest final-game completion time → emits `MatchCompleted` (internal aggregate event) followed by `MatchResultPublished` (integration event → Tournament ingests result for top-3 advancement if tournament room, Ranking updates, Audit records final result, Spectator shows end state).
@@ -700,7 +766,7 @@ The room aggregate checks the actor's role on every command. Commands from spect
 ### 6.1 Idempotency and Deduplication
 
 All cross-context event consumers enforce idempotency using composite keys:
-- **Tournament:** `{roomMatchId, sequenceNumber}` — prevents double-counting match results.
+- **Tournament:** `{roomMatchId, matchResultVersion}` — prevents double-counting match results.
 - **Ranking:** `{gameId, sequenceNumber}` — prevents duplicate Elo updates.
 - **Audit:** `{gameId, sequenceNumber}` — prevents duplicate log entries (though append-only stores are naturally tolerant of replay if entries are identical).
 
@@ -734,41 +800,50 @@ Tournament round advancement is a multi-step process: result ingestion → top-3
 
 ---
 
-## 7. Architecture Decisions
+## 7. Domain-Level Design Decisions
 
-### 7.1 Separation of command processing and state distribution
+### 7.1 Synchronous command validation, asynchronous state propagation
 
-Player actions are submitted synchronously and validated against the authoritative game state. Accepted state changes are then propagated asynchronously to all connected clients. This separation exists because game logic needs to serialize concurrent actions (one authoritative writer per room), while state distribution is a fan-out problem that scales independently.
+Player actions are validated synchronously against the authoritative game state before being accepted. Accepted state changes are then propagated asynchronously to interested bounded contexts and connected clients. This decision exists because game rules require serialized command processing within a single room (one authoritative writer), while notifying observers and downstream contexts is a distribution concern that must not block the gameplay path.
 
 ### 7.2 Optimistic concurrency via sequence numbers
 
-Every client command carries a sequence number representing the client's known state version. If the number is stale, the command is rejected and the client must reconcile by consuming the live state stream. This avoids locking while guaranteeing that concurrent or stale actions never corrupt authoritative state.
+Every client command carries a sequence number representing the client's known state version. If the number is stale, the command is rejected and the client must reconcile via the live state stream. This domain-level mechanism avoids locking while guaranteeing that concurrent or stale actions never corrupt the authoritative game state.
 
-### 7.3 Multi-step tournament advancement
-Tournament advancement follows a sequential multi-step process: result ingestion → top-3 determination → next-round room creation. Each step is idempotent, checkpointed, and safely resumable from the point of failure. This is necessary because tournament rounds involve thousands of independently completing matches, and synchronous orchestration would create brittle coupling and temporal dependencies.
-### 7.4 Eventual consistency between Game and Tournament contexts
+### 7.3 Idempotent multi-step tournament advancement
 
-When a match completes, the Room Play context publishes the result as a `MatchResultPublished` integration event. The Tournament context consumes it asynchronously. Bracket state is eventually consistent with match outcomes — acceptable because bracket advancement is not time-critical. The authoritative advancement decision is always made against the write-side state, never the read-optimized projection.
+Tournament advancement follows a sequential domain process: result ingestion → top-3 determination → next-round room creation. Each step is idempotent and safely resumable from the point of failure. This is necessary because tournament rounds involve thousands of independently completing matches, and treating advancement as a single atomic operation would create fragile temporal coupling between the Room Play and Tournament contexts.
 
-### 7.5 Asynchronous Elo calculation (CQRS)
+### 7.4 Eventual consistency between Room Play and Tournament contexts
 
-Ranking updates are computed asynchronously from `GameResultPublished` integration events, producing a read-optimized leaderboard. This decouples the latency-sensitive gameplay path from ranking recalculation. Rankings are a read model — they don't need to be consistent at the moment a game ends, only eventually correct.
+When a match completes, the Room Play context publishes `MatchResultPublished` as an integration event. The Tournament context consumes it asynchronously. Bracket state is eventually consistent with match outcomes — acceptable because bracket advancement is not time-critical relative to gameplay. The authoritative advancement decision is always made against the Tournament aggregate's write-side state, never against read-optimized projections.
 
-### 7.6 Immutable audit log for game integrity
+### 7.5 Ranking as a derived read model
 
-Every state change in a room is appended to an immutable log before being broadcast. The log includes deterministic RNG seeds, enabling full game replay. This provides the traceability required for dispute resolution and fraud investigation without adding latency to the gameplay path.
+Ranking updates are computed asynchronously from `GameResultPublished` integration events. The leaderboard is a read-optimized view derived from game results — it does not need to be consistent at the instant a game ends, only eventually correct. This decouples the latency-sensitive gameplay path from ranking recalculation and allows the Ranking context to evolve its calculation logic independently.
 
-### 7.7 Projection-based live views with role separation
+### 7.6 Log-before-broadcast for game integrity
 
-The live view system builds separate projections for players (who see their own hand) and spectators (who see only public state). Privacy is enforced at the projection level — a spectator stream physically cannot contain private data because it was never included. This is safer than filtering at delivery time.
+Every state change in a room is appended to the immutable game log before being propagated to clients or downstream contexts (DR-7). The log includes deterministic RNG seeds, enabling full game replay. This provides the traceability required for dispute resolution and fraud investigation.
+
+### 7.7 Privacy enforcement at projection construction
+
+The Spectator & Live View context builds separate projections for players (who see their own hand) and spectators (who see only public state). Privacy is enforced at projection construction time — the spectator projection physically never contains private hand data. This is a domain-level decision: filtering at delivery time would create a risk surface where implementation errors could leak private state.
 
 ### 7.8 Disconnection and reconnection as domain-level concerns
 
-Disconnection is handled within the game domain, not as an infrastructure concern. The room aggregate manages the 60-second grace timer and skips the disconnected player's turns (no bot substitution). On reconnection, the player receives a delta from their last known sequence number. Forfeit behavior differs by room type (casual vs. tournament).
+Disconnection is modeled within the game domain, not treated as an infrastructure event. The Room aggregate manages the 60-second grace timer and skips the disconnected player's turns (no bot substitution). On reconnection, the player receives a delta from their last known sequence number. Forfeit behavior differs by room type (casual vs. tournament), making this a business rule, not a connectivity concern.
 
 ### 7.9 Internal events vs integration events
 
 Domain events within the Room Play context are split into two categories: **internal aggregate events** (`GameCompleted`, `MatchCompleted`) that drive state transitions within the aggregate, and **integration events** (`GameResultPublished`, `MatchResultPublished`) that carry immutable value-object payloads to downstream bounded contexts. This separation ensures that internal state transitions can evolve independently from the published contract consumed by Tournament, Ranking, and Audit.
+
+### 7.10 Casual rooms as single-game matches
+
+Casual (ad-hoc) rooms consist of a single game [A7]. The three-game match structure applies exclusively to tournament rooms, where complete placement data across multiple games is essential for fair top-3 advancement and tie-breaking. If the host of a casual room wants to play again, they create a new room. This simplifies the casual gameplay path while preserving the competitive rigor required by tournaments.
+
+### 7.11 Below-minimum-players resolution in casual rooms
+When a casual room drops below 2 active players due to forfeits or disconnections, the remaining player is declared the winner by default. The game is marked as completed and emits `GameCompleted` and `GameResultPublished`. However, the game is flagged as resolved-by-abandonment. The Ranking context treats games where all opponents forfeited as abandoned and does **not** update Elo (DR-6), preserving ranking integrity.
 
 ---
 
@@ -790,14 +865,15 @@ Domain events within the Room Play context are split into two categories: **inte
 
 ### 8.2 Open Questions
 
+### 8.2 Open Questions
+
 | # | Question | Impact |
 |---|---|---|
 | Q1 | **What is the turn timeout duration?** The assignment specifies 60s for disconnection but not for turn timeout. | Affects gameplay pacing. Needs to be defined — possibly configurable per room type. |
 | Q2 | **Can a player voluntarily leave a casual room mid-match?** Or is the only exit path disconnection/forfeit? | Affects room lifecycle and whether we need a `LeaveRoom` command distinct from disconnection. |
-| Q3 | **What happens when a casual room drops below 2 players due to forfeits?** Does the remaining player win by default? | Affects game-end detection logic and whether an abandoned game (below minimum players) counts for Elo. |
-| Q4 | **How is tournament-placement rating calculated?** The assignment mentions it exists separately from Elo but doesn't define the formula. | Affects the Ranking context model. May be based on tournament finishing position. |
-| Q5 | **Is there a maximum tournament size beyond 1M, or is 1M the hard cap?** | Affects capacity planning assumptions, though not domain design directly. |
-| Q6 | **Can spectators observe tournament bracket state, or only individual room games?** | Affects whether the Spectator context needs a `TournamentProjection` in addition to `RoomProjection`. |
-| Q7 | **What happens if the initial card revealed from the draw pile is a wild or action card?** Standard Uno rules vary on this. | Affects the `InitialCardRevealed` event handling in the Room aggregate. |
-| Q8 | **Connection-semantics assumption:** We assume clients connect via a long-lived channel for receiving state updates and a request-response channel for submitting commands. The specific protocols are out of scope for this iteration. | Protocol design is deferred per Section 3 of the assignment instructions. |
-| Q9 | **How are players distributed into rooms each tournament round?** The assignment states "rooms of up to 10" but does not specify whether placement is random, Elo-seeded, or follows another strategy. | Affects competitive fairness and bracket balancing. |
+| Q3 | **How is tournament-placement rating calculated?** The assignment mentions it exists separately from Elo but doesn't define the formula. | Affects the Ranking context model. May be based on tournament finishing position. |
+| Q4 | **Is there a maximum tournament size beyond 1M, or is 1M the hard cap?** | Affects capacity planning assumptions, though not domain design directly. |
+| Q5 | **Can spectators observe tournament bracket state, or only individual room games?** | Affects whether the Spectator context needs a `TournamentProjection` in addition to `RoomProjection`. |
+| Q6 | **What happens if the initial card revealed from the draw pile is a wild or action card?** Standard Uno rules vary on this. | Affects the `InitialCardRevealed` event handling in the Room aggregate. |
+| Q7 | **Connection-semantics assumption:** We assume clients connect via a long-lived channel for receiving state updates and a request-response channel for submitting commands. The specific protocols are out of scope for this iteration. | Protocol design is deferred per Section 3 of the assignment instructions. |
+| Q8 | **How are players distributed into rooms each tournament round?** The assignment states "rooms of up to 10" but does not specify whether placement is random, Elo-seeded, or follows another strategy. | Affects competitive fairness and bracket balancing. |
