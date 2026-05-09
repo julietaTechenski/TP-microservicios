@@ -150,6 +150,7 @@ The platform must be the **authoritative source of truth** for gameplay state, t
 - **NFR-P2**: The system must support high volumes of concurrent active games and gameplay actions.
 - **NFR-P3**: The system must tolerate burst traffic during tournament round starts and completions.
 - **NFR-P4**: The system must support large numbers of concurrent players and spectators receiving live updates.
+- **NFR-P5**: The system must absorb the **first-round tournament kickoff surge**, in which on the order of **100,000 rooms transition from waiting to in_progress within seconds** of a round start, without losing correctness, dropping room creations, or stalling the gameplay hot path. Mechanisms must include sharded fan-out workers with rate-limited enqueue, idempotent room creation (so retries are safe under at-least-once delivery), and explicit thundering-herd controls in front of brokers and gameplay services.
 
 ### 4.2 Scalability
 
