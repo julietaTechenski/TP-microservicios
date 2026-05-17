@@ -10,6 +10,8 @@ This repository contains the **domain design checkpoint** for the Microservices 
 |---|---|
 | [REQUIREMENTS.md](./REQUIREMENTS.md) | Functional and non-functional requirements. Source of truth for traceability. |
 | [DESIGN.md](./DESIGN.md) | Full DDD design: EventStorming, bounded contexts, aggregates, domain events, narrative flows, edge cases, and consistency strategy. |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | Microservices architecture: service decomposition, public interfaces, communication patterns, persistence, capacity sketch, sequence diagrams, and ADRs. |
+| [CHANGELOG-design.md](./CHANGELOG-design.md) | Record of every design-package change made to align with the architecture checkpoint, with rationale and non-negotiable affirmations. |
 
 ## Domain Flow (summary)
 
@@ -17,7 +19,7 @@ This repository contains the **domain design checkpoint** for the Microservices 
 Player / Operator
     → CreateRoom / CreateTournament
     → JoinRoom / RegisterForTournament
-    → StartMatch → [three-game series (tournament) | single game (casual)] → MatchResultPublished
+    → StartMatch → [best-of-three series, early termination at 2 wins (tournament) | single game (casual)] → MatchResultPublished
                                                                                     ↓
                                                                         Tournament: top-3 advancement
                                                                         Ranking: Elo update (casual only)
