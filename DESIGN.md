@@ -455,15 +455,15 @@ The Spectator & Live View context is a **downstream conformist** that builds pro
 | `PlayerDisconnected` | roomId, playerId, graceTimerDeadline | Disconnection detected |
 | `PlayerReconnected` | roomId, playerId | Player rejoined within grace window |
 | `PlayerForfeited` | roomId, playerId, reason, roomType (casual/tournament) | Grace timer expired or player eliminated |
-| `GameCompleted` | roomId, gameNumber, winner, cardPointTotals, isAbandoned (boolean), completionTimestamp | Game ended within Room aggregate; triggers next game or match completion logic. `isAbandoned = true` signals that the game terminated via the below-minimum-players rule (section 7.11), which makes the result ineligible for Elo (section 4.3 / DR-6). |
+| `GameCompleted` | roomId, gameNumber, winner, cardPointTotals, outcome (`completed` / `abandoned`), completionTimestamp | Game ended within Room aggregate; triggers next game or match completion logic. `outcome = abandoned` signals that the game terminated via the below-minimum-players rule (section 7.11), which makes the result ineligible for Elo (section 4.3 / DR-6). |
 | `MatchCompleted` | roomId, winner, gameWinCounts, placementOrder, cumulativeCardPoints | Match ended within Room aggregate; triggers room completion |
 
 *Integration events (published to downstream bounded contexts):*
 
 | Event | Payload (conceptual) | Consumers |
 |---|---|---|
-| `GameResultPublished` | roomId, gameNumber, gameResult (`GameResult` VO: winner, cardPointTotals, placementContext, isAbandoned, completionTimestamp) | Ranking (casual rooms only, for Elo — `isAbandoned = true` is filtered out by the Ranking ACL per DR-6), Audit |
-| `MatchResultPublished` | roomId, matchResult (`MatchResult` VO: winner, gameWins, placementOrder, cumulativeCardPoints) | Tournament (top-3 advancement, if tournament room), Spectator (end state), Audit |
+| `GameResultPublished` | roomId, gameNumber, gameResult (`GameResult` VO: winner, cardPointTotals, placementContext, outcome, completionTimestamp) | Ranking (casual rooms only, for Elo — `outcome = abandoned` events are filtered out by the Ranking ACL per DR-6), Audit |
+| `MatchResultPublished` | roomId, matchResult (`MatchResult` VO: winner, gameWins, placementOrder, cumulativeCardPoints, outcome (`completed` / `abandoned` / `forfeit_all`)) | Tournament (top-3 advancement, if tournament room), Spectator (end state), Audit |
 
 *Note:* All internal events are also consumed by **Spectator** (for live projection updates) and **Audit** (for the immutable game log). The integration events above are specifically the cross-context events that carry value-object payloads and trigger domain logic in other bounded contexts.
 
@@ -701,7 +701,7 @@ The `SessionInvalidated` event is the integration contract used by the context m
 
 1. Room Play emits `GameResultPublished` carrying the `GameResult` value object: gameId, room type (casual/tournament), game winner, card-point totals, placement context, and `isAbandoned`.
 2. **Ranking** consumes the integration event (asynchronous propagation).
-3. Ranking checks eligibility (synchronous decision point): Is it a casual game? Is `isAbandoned = true` (game resolved by abandonment per section 7.11)? → If not eligible, event is discarded with no Elo movement (DR-6).
+3. Ranking checks eligibility (synchronous decision point): Is it a casual game? Is `outcome = abandoned` (game resolved by abandonment per section 7.11)? → If not eligible, event is discarded with no Elo movement (DR-6).
 4. Ranking checks idempotency key `{gameId, sequenceNumber}` → If duplicate, silently discarded.
 5. Ranking calculates Elo delta based on placement order (1st through last) within the room using a weighted formula.
 6. Ranking applies the update to the `PlayerRanking` aggregate for each player → emits `EloUpdated` and `RatingHistoryAppended` per player (async → Spectator refreshes leaderboard and player profile history).
@@ -894,7 +894,7 @@ Domain events within the Room Play context are split into two categories: **inte
 Casual (ad-hoc) rooms consist of a single game [A7]. The best-of-three match structure (early termination as soon as one player wins 2 games; at most 3 games played) applies exclusively to tournament rooms, where multi-game data across the series is essential for fair top-3 advancement and tie-breaking. If the host of a casual room wants to play again, they create a new room. This simplifies the casual gameplay path while preserving the competitive rigor required by tournaments.
 
 ### 7.11 Below-minimum-players resolution in casual rooms
-When a casual room drops below 2 active players due to forfeits or disconnections, the remaining player is declared the winner by default. The game is marked as completed and emits `GameCompleted` and `GameResultPublished`. However, the game is flagged as resolved-by-abandonment. The Ranking context treats games where all opponents forfeited as abandoned and does **not** update Elo (DR-6), preserving ranking integrity.
+When a casual room drops below 2 active players due to forfeits or disconnections, the remaining player is declared the winner by default. The game emits `GameCompleted` and `GameResultPublished` with `outcome = abandoned`. The Ranking context skips Elo updates for any game where `outcome = abandoned` (DR-6), preserving ranking integrity.
 
 ---
 
