@@ -92,7 +92,7 @@ The platform must be the **authoritative source of truth** for gameplay state, t
 - **FR-T3**: The system must support tournaments with up to 1,000,000 players.
 - **FR-T4**: A tournament must have an explicit lifecycle with at least the states: planned, open_for_registration, in_progress, completed, and cancelled.
 - **FR-T5**: The system must manage brackets and determine player grouping into rooms of up to 10 players for each round.
-- **FR-T6**: Within each room, players play a three-game match. The **top 3 players** by match wins advance to the next round.
+- **FR-T6**: Within each room, players play a best-of-three match (early termination: the match ends as soon as one player wins two games; at most three games are played). The **top 3 players** by match wins advance to the next round.
 - **FR-T7**: The system must mark non-advancing players as eliminated.
 - **FR-T8**: The system must expose tournament progress, including round status, bracket position, and advancement state.
 - **FR-T9**: Tournament rounds proceed in elimination until **10 or fewer players** remain, at which point a single final room is created to determine the champion.
