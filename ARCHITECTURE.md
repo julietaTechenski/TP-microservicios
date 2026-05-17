@@ -327,8 +327,8 @@ negotiation for major schema bumps.
 | `ChallengeWindowExpired` | room-play (timer worker) | `roomId` | room-play | Idempotent; deduped by `{gameId, challengeId}`. |
 | `ReconnectionTimerExpired` | room-play (timer worker) | `roomId` | room-play | Idempotent; deduped by `{roomId, sessionId, openedAt}`. |
 | `GameCompleted` | room-play | `roomId` | room-play | Discriminator: `outcome ∈ {completed, abandoned}`. Used by Match-series state machine and downstream consumers. |
-| `GameResultPublished` | room-play | `playerId` (one event per player ranking) **or** `roomId` (one fan-out event) — the architecture publishes **one** event per game keyed by `roomId` and ranking-service repartitions on `playerId` via its consumer | room-play | Carries `outcome`, `eloEligible: bool`, players, scores. Downstream Elo path. |
-| `MatchEnded` | room-play | `roomId` | room-play | Series finished (2 wins). Carries scoreline and series winner. |
+| `GameResultPublished` | room-play | `playerId` (one event per player ranking) **or** `roomId` (one fan-out event) — the architecture publishes **one** event per game keyed by `roomId` and ranking-service repartitions on `playerId` via its consumer | room-play | Carries `outcome ∈ {completed, abandoned}`, players, scores. Downstream Elo path. |
+| `MatchCompleted` | room-play | `roomId` | room-play | Series finished (early termination at 2 wins, or after game 3). Carries scoreline and series winner. Internal event; drives `MatchResultPublished` outbox emission. |
 | `MatchResultPublished` | room-play | `roomMatchId` | room-play | Cross-context contract for tournament-service ingestion. |
 
 **Idempotency keys.** Commands deduped by `Idempotency-Key` over a configurable
@@ -447,9 +447,9 @@ Lifecycle:
 - Each `GameCompleted` is consumed by the **Match aggregate inside the same
   pod** (no Kafka round-trip — same partition, same actor mailbox, same
   Postgres transaction): the scoreline is updated, and:
-  - if `outcome = abandoned`, the match is closed without a winner and
-    `MatchEnded(outcome=abandoned)` is emitted;
-  - if some player has 2 wins, `MatchEnded(outcome=completed,
+  - if `outcome = abandoned` (all players forfeited), the match is closed
+    without a winner and `MatchCompleted(outcome=abandoned)` is emitted;
+  - if some player has 2 wins, `MatchCompleted(outcome=completed,
     winnerId)` and `MatchResultPublished` are emitted;
   - otherwise a new `GameInstance` is created and `GameStarted` is emitted.
 
@@ -476,19 +476,17 @@ Detection is owned by room-play-service:
 The distinction is carried explicitly in the events:
 
 - `GameCompleted.outcome ∈ {completed, abandoned}`.
-- `GameResultPublished.eloEligible: bool` — set to `false` when
-  `outcome=abandoned` **or** when the game belongs to a tournament room
-  (carried via `GameResultPublished.tournamentId` being non-null).
+- `GameResultPublished.outcome ∈ {completed, abandoned}` — ranking-service
+  skips Elo updates when `outcome = abandoned`. Tournament games never reach
+  ranking-service via this event — `GameResultPublished` is produced only for
+  casual rooms, so tournament exclusion is enforced at the source.
 - `MatchResultPublished.outcome ∈ {completed, abandoned, forfeit_all}` —
   consumed by tournament-service to record forfeits as advancement losses
   per `DESIGN.md` §1.2.
 
-Ranking-service therefore does not need to introspect domain rules: it
-reads `eloEligible` and skips ineligible events. This carries the
-Elo-scope rules (FR-K1, FR-K2, FR-K5, DR-6 — no tournament games, no
-abandoned casual games) into the integration contract instead of leaving
-it as a
-domain-knowledge dependency on the consumer.
+Ranking-service therefore does not need to introspect domain rules beyond
+checking `outcome`; the Elo-scope rules (FR-K1, FR-K2, FR-K5, DR-6 — no
+tournament games, no abandoned casual games) are enforced at the producer.
 
 ### 5.2 Tournament (Core)
 
@@ -651,10 +649,10 @@ that decision is carried by the producing event (`eloEligible`, presence of
 | `GameResultPublished` | `playerId` (consumer rekeys) | `{gameId, sequenceNumber, playerId}` |
 | `FinalStandingsPublished` | `tournamentId` | `{tournamentId, finalStandingsVersion, playerId}` |
 
-Eligibility filtering: `if not eloEligible: skip` for the casual path. The
-tournament path consumes only `FinalStandingsPublished`, so abandoned
-tournament rooms (forfeits) flow through tournament-service's
-top-3 advancement and only the final standings drive the rating update.
+Eligibility filtering: skip if `outcome = abandoned`; `GameResultPublished`
+is produced only for casual games so tournament exclusion is enforced at
+the source. The tournament path consumes only `FinalStandingsPublished`,
+so tournament rooms never reach the casual Elo path.
 
 **Internal-only interfaces.** Materialised-view refresh worker (Postgres
 `REFRESH MATERIALIZED VIEW CONCURRENTLY`) triggered post-consumption.
@@ -923,7 +921,7 @@ process-manager), **JWT** (token validation only).
 | GW-RT | api-gateway → realtime-edge → spectator-service | Sync REST upgrade to SSE | Long-lived live delivery; one-way fan-out. | SSE drop → client reconnects with `Last-Event-ID`; bounded patch buffer per connection. |
 | RP-AUD | room-play → audit | Pub/Sub (Kafka, all room-play topics) | Superset audit needs full log; decoupled to keep gameplay hot path independent of audit availability. | Outbox buffers; Kafka retention covers audit downtime; on consumer crash, restart from committed offsets. |
 | RP-SP | room-play → spectator-projector | Pub/Sub (`room-play.*`) | Projections must be eventually consistent and cheap to rebuild. | At-least-once + dedup `{streamId, sequenceNumber}`; stale projections rebuilt from log. |
-| RP-RK | room-play → ranking | Pub/Sub (`room-play.GameResultPublished`) | Ranking is supporting, must not block gameplay. | Dedup `{gameId, sequenceNumber, playerId}`; `eloEligible=false` → skip; DLQ on schema mismatch. |
+| RP-RK | room-play → ranking | Pub/Sub (`room-play.GameResultPublished`) | Ranking is supporting, must not block gameplay. | Dedup `{gameId, sequenceNumber, playerId}`; `outcome=abandoned` → skip; DLQ on schema mismatch. |
 | RP-TRN | room-play → tournament | Pub/Sub (`room-play.MatchResultPublished`) | Tournament advances on match outcomes; cross-context boundary. | Dedup `{roomMatchId, matchResultVersion}`; idempotent process-manager step. |
 | TRN-RP-A | tournament → room-play (round kickoff) | Pub/Sub (`tournament.room-creation`) + sharded workers + Sync REST `POST /rooms` | First-round surge: 100k rooms in seconds. | Token-bucketed dispatch; `Idempotency-Key={tournamentId, roundIndex, seatGroup}`; DLQ + operator alert; partial-failure compensation forfeits unjoined seats after T s. |
 | TRN-RP-B | tournament → room-play (final room) | Pub/Sub (`tournament.FinalRoomCreated`) | Single room; small surge. | Idempotent room creation. |
@@ -1065,7 +1063,7 @@ restarts affect it.
 | Single-active-session push-invalidation | identity-service emits `SessionInvalidated`; realtime-edge consumer-group closes the open SSE socket; room-play-service triggers grace-timer flow (§5.6.1). | If realtime-edge restarts mid-event, Kafka redelivers; idempotent close (already-closed → no-op). The new session can subscribe immediately because its `sessionId` is different. |
 | Spectator projection privacy | spectator-service builds `SpectatorView` by filtering hand-changing events at projection construction (§5.4). | The hand data is not present in the spectator projection store, so a delivery-side authorization bug cannot leak it. |
 | Match-series coordination | room-play-service `Match` aggregate inside the same actor mailbox as `GameInstance` (§5.1.3). | The series state machine is part of the same outbox transaction; cross-game transition cannot leave the series in an inconsistent half-broadcast state. |
-| Abandoned vs completed game outcomes | room-play-service emits `GameResultPublished.eloEligible` and `MatchResultPublished.outcome ∈ {completed, abandoned, forfeit_all}` (§5.1.4). | Eligibility is carried in the event, not derived by consumers; a consumer restart cannot accidentally re-rate. |
+| Abandoned vs completed game outcomes | room-play-service emits `GameCompleted.outcome`, `GameResultPublished.outcome`, and `MatchResultPublished.outcome ∈ {completed, abandoned, forfeit_all}` (§5.1.4). | Eligibility is carried in the event, not derived by consumers; a consumer restart cannot accidentally re-rate. |
 
 ---
 
@@ -1408,7 +1406,7 @@ sequenceDiagram
     ACT->>DB: COMMIT GameCompleted(outcome, scoreDelta), outbox rows
     Note over ACT: same actor consumes GameCompleted internally,<br/>updates Match scoreline, decides next step
     alt scoreline reaches 2 wins
-        ACT->>DB: COMMIT MatchEnded, MatchResultPublished, outbox
+        ACT->>DB: COMMIT MatchCompleted, MatchResultPublished, outbox
     else continue series
         ACT->>DB: COMMIT GameStarted (next game), outbox
     end
