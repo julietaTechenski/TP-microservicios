@@ -655,7 +655,11 @@ the source. The tournament path consumes only `FinalStandingsPublished`,
 so tournament rooms never reach the casual Elo path.
 
 **Internal-only interfaces.** Materialised-view refresh worker (Postgres
-`REFRESH MATERIALIZED VIEW CONCURRENTLY`) triggered post-consumption.
+`REFRESH MATERIALIZED VIEW CONCURRENTLY`) triggered post-consumption. It runs
+on the named consumer group `ranking-leaderboard-materializer` (distinct from
+the `spectator-projector` and `tournament-readmodel` groups), so leaderboard
+refresh lag is tracked and scaled independently of the Elo write path. Refresh
+cadence and the resulting staleness bound are stated in §7.1 / §13.2.
 
 **Dependencies.** Conformist consumer of room-play and tournament events.
 
@@ -994,7 +998,7 @@ client-supplied bodies. The Redis store row is in the integration table
 |---|---|---|---|---|
 | Room Play | Postgres (per-room event log + snapshot + outbox + `pending_timeouts`) | Redis (next-deadline sorted set, presence map) | Strong within a `roomId` partition; events are the source of truth. | None inside the context; spectator-service holds the read models. |
 | Tournament | Postgres (relational + process-manager checkpoints + `processed_match_results`) | — | Strong per `tournamentId`; cross-tournament: independent. | `tournaments/{id}` snapshot endpoint is built from the relational state. |
-| Ranking | Postgres (`player_ranking`, `rating_history`, `processed_results`) | Redis (leaderboard cache) | Eventual; per-player updates are serialised via Kafka partition by `playerId`. | Materialised leaderboards (`REFRESH MATERIALIZED VIEW CONCURRENTLY`). |
+| Ranking | Postgres (`player_ranking`, `rating_history`, `processed_results`) | Redis (leaderboard cache) | Eventual; per-player updates are serialised via Kafka partition by `playerId`. Leaderboard read model is bounded-stale: materialised-view refresh cycle ≤ 30 s, leaderboard staleness P95 ≤ 60 s from `EloUpdated`/`TournamentPlacementRatingUpdated` to projected leaderboard. | Materialised leaderboards (`REFRESH MATERIALIZED VIEW CONCURRENTLY`) on the `ranking-leaderboard-materializer` consumer group (§5.3). |
 | Spectator / Live View | Postgres (projection state + per-room append-only patch log) | Redis (snapshot cache for popular rooms; SSE backpressure buffer) | Eventual relative to room-play; bounded staleness target P95 5s. | The whole context is a read model. |
 | Audit | Postgres (hot tier, append-only) | S3-compatible object store (cold tier) | Append-only; entries are immutable once written. | Replay endpoint is a derived view. |
 | Identity | Postgres (`user_account`, `credentials`, `session`, `role_assignment`) | KMS (signing keys), Redis (JWKS cache by consumers) | Strong within Identity; eventual to consumers via events. | None. |
@@ -1016,8 +1020,12 @@ CQRS is applied to read-heavy projections, **not** to the gameplay write path:
 ### 7.3 Retention and audit
 
 - **Hot game logs.** 90 days in audit-service Postgres (placeholder, FR-A6).
-- **Cold game logs.** Object store, retention per policy. Tournament logs
-  retained longer than casual logs (`DESIGN.md` A9).
+- **Cold game logs.** Object store, retention per record class. Casual game
+  logs retained **1 year** (placeholder); **tournament game logs retained 7
+  years** in the cold S3-compatible tier — the longer window is a regulatory /
+  prize-integrity assumption so finals remain disputable well after the event
+  (`DESIGN.md` A9 leaves the exact durations open; these are the architectural
+  placeholders that close the forward reference).
 - **System audit log.** Indefinite retention for security-class entries
   (login attempts, session invalidations, role changes).
 - **Event-bus retention.** 7 days for hot replay; cold replay reconstructed
@@ -1103,6 +1111,20 @@ delayed regional edges).
 | `RoomCreationRequested` peak rate at round kickoff | ~1 × 10⁵ in ~10–30 s | Driven by sharded workers (§5.2.1); rate-limited at the cluster level so the burst does not exceed room-play-service's accept ceiling. |
 | `SessionInvalidated` rate | ~1 × 10² – 1 × 10³ / s peak | Cheap; one consumer-group entry per realtime-edge pod. |
 
+**Partition sizing (order of magnitude).** Partition counts are chosen so the
+per-partition write rate stays an order of magnitude below a conservative
+single-partition ceiling of ~10⁴ msg/s. Indicative sizing for the hot topics:
+
+| Topic | Peak rate | Partitions (order of magnitude) | Basis |
+|---|---|---|---|
+| `room-play.GameResultPublished` | ~5 × 10⁵ events/s | ~64 | peak rate ÷ ~10⁴/partition, rounded up to a power of two for even `playerId` rekey distribution. |
+| `room-play.MatchResultPublished` | ~1 × 10⁵ in ~10 s (~10⁴/s sustained) | ~32 | absorbs the round-end burst into tournament-service and the read model without per-partition hot-spotting. |
+| `tournament.room-creation` | ~1 × 10⁵ in ~10–30 s | ~64 | matches the round-kickoff fan-out width (W ≈ 200 workers, §5.2.1) so workers are not partition-starved. |
+| `identity.SessionInvalidated` | ~10³/s | ~8 | low volume; partitioned by `userId` only for ordering, not throughput. |
+
+These are order-of-magnitude anchors, not tuned values; the exact counts are
+load-test outputs (AQ-1, AQ-6).
+
 ### 9.4 Scaling profile
 
 | Component | Scaling | Notes |
@@ -1110,7 +1132,7 @@ delayed regional edges).
 | api-gateway / realtime-edge | Horizontal, stateless beyond connection table | Connection-count-bounded; HPA on FD utilisation and CPU. |
 | room-play-service | Horizontal via consistent-hash room sharding | Single-writer per `roomId`; pod count chosen so per-pod owned-room count is manageable (~hundreds–low thousands per pod under burst). |
 | Outbox relay | Single-writer per Postgres partition (leader-elected) | Scales by number of Postgres partitions. |
-| Kafka | Horizontal (broker count, partition count) | Partition count chosen so per-partition write rate stays below broker per-partition ceiling under round-end burst. |
+| Kafka | Horizontal (broker count, partition count) | Partition count chosen so per-partition write rate stays below the per-partition ceiling under round-end burst; per-topic sizing in §9.3. |
 | tournament-service (write) | Horizontal by `tournamentId` partition | Within a tournament: single-writer process manager (intentional). |
 | round-kickoff-workers | Horizontal (W pods, e.g. ~200 at peak); cluster-cooperative rate limiter | Sharded fan-out without a choke point. |
 | ranking-service | Horizontal by `playerId` | Read traffic absorbed by leaderboard cache + CDN-friendly snapshot. |
@@ -1127,6 +1149,56 @@ delayed regional edges).
 - Outbox relay leader per Postgres partition — partitioned single-writer.
 
 No global singleton is on the gameplay hot path.
+
+**Identity-service session store under the login burst.** The single-active-session
+invariant (DR-15) is enforced per `userId`, so the session store is **not** a
+single-writer bottleneck: it is **horizontally sharded by `userId`** (hash
+range), and the uniqueness/invalidation that DR-15 requires is local to one
+shard (one user's prior session and new session live on the same shard). The
+1M-player login burst at tournament start therefore fans out across shards
+rather than serialising on a global writer. `identity-service` pods are
+stateless and scale horizontally in front of the sharded store; the
+`SessionInvalidated` emission rides the same per-`userId` outbox so ordering
+per user is preserved without cross-shard coordination. JWKS validation is
+cached at consumers (§6.2), so the login burst does not translate into a
+read burst on identity-service.
+
+### 9.6 Storage growth estimate
+
+Order-of-magnitude data-volume reasoning, chaining the figures already used
+above so the sketch is self-consistent. All inputs are deliberately rounded.
+
+**Per-unit sizes.**
+
+| Quantity | Estimate | Basis |
+|---|---|---|
+| Average event payload | ~1 KB | A `CardPlayed`/`GameResultPublished` row with headers, correlation id, and JSON state delta. |
+| Events per game | ~100 | ~1 command/turn × tens of turns, each emitting 1–3 events (§9.3). |
+| Games per match | ~3 | best-of-three (FR-R19); ~300 events ≈ **~0.3 MB per room-match**. |
+
+**Per-tournament volume (write side, room-play event log).** A max-scale
+tournament has ~1.1 × 10⁵ room-matches summed across all rounds
+(10⁶ → 10⁵ → 10⁴ → 10³ → 10² → 10 seats). At ~0.3 MB each →
+**~33 GB of raw game-log events per maximum-scale tournament**.
+
+**Hot-tier volume.** Steady-state casual play dominates the hot tier. Taking
+~10⁷ casual games/day (single game ≈ 100 events ≈ 0.1 MB) →
+~10⁷ × 0.1 MB ≈ **~1 TB/day** of game-log ingest. Over the 90-day hot-tier
+retention window (§7.3) that is **~90 TB** in audit-service Postgres for casual
+play, plus a few × 10 GB per mega-tournament — i.e. the hot tier is an
+**~10² TB** order-of-magnitude store.
+
+**Cold-tier growth.** After hot retention, logs migrate to the S3-compatible
+cold tier (§7.3). At ~1 TB/day sustained ingest the cold tier accrues on the
+order of **~0.3 PB/year**, with tournament logs held 7 years (≈ a few PB
+steady-state) and casual logs aged out at 1 year. Spectator projection state
+and ranking history are negligible by comparison (projections are rebuildable
+and bounded by live room count, §11.3; `rating_history` is ~hundreds of bytes
+per game).
+
+These figures size the audit-service hot tier (Postgres, ~10² TB), the
+cold-tier object-store budget (PB-scale, AQ-2), and confirm the cold tier — not
+the gameplay hot path — is the dominant long-term storage cost.
 
 ---
 
@@ -1163,9 +1235,14 @@ No global singleton is on the gameplay hot path.
 - **SSE backpressure.** Per-client send queue with a bounded buffer; on
   overflow the connection is closed and the client reconnects with
   `Last-Event-ID`. Better than silently dropping patches.
-- **Spectator fan-out cap.** Per-room max concurrent connections at
-  realtime-edge for popular rooms; excess viewers are served from a
-  short-TTL Redis snapshot cache or a regional CDN-cached snapshot.
+- **Spectator fan-out cap.** A per-room ceiling of **~500 direct SSE
+  connections** at realtime-edge (placeholder, tuned per realtime-edge
+  benchmark — AQ-7). Beyond that threshold, excess viewers for a marquee room
+  are served a short-TTL (~1–2 s) Redis snapshot or a regional CDN-cached
+  snapshot rather than a live per-connection stream. This bounds per-room
+  fan-out cost so a single headline final cannot saturate a realtime-edge pod,
+  and is the mechanism behind the "capped per-room" qualifier on the
+  ~10⁷-spectator figure in §9.1.
 - **Kafka backpressure.** Producers back off when the broker is slow; this
   flows back into outbox accumulation, which is bounded and alerted.
 - **Command rate limiting** (§6.6) provides upstream backpressure against
@@ -1296,6 +1373,7 @@ added for spectator-heavy events without touching the projection pipeline.
 | `tournament.advancement_lag` | < 5 s P95 | from last `MatchResultPublished` to `RoundCompleted` |
 | `tournament.kickoff_completion_time` | < 30 s | round 1 first-to-last room creation |
 | `ranking.event_consumption_lag` | < 10 s P95 | informational |
+| `ranking.leaderboard_staleness_p95` | < 60 s | refresh cycle ≤ 30 s; `ranking-leaderboard-materializer` |
 | `realtime_edge.connection_count` | per-pod | drives HPA |
 | `realtime_edge.session_invalidation_close_latency` | < 2 s P95 | from `SessionInvalidated` to socket close |
 | `tournament_readmodel.bracket_staleness_p95` | < 5 s | round-end spike health |
